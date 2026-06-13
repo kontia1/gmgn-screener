@@ -546,6 +546,12 @@ async function checkPositions() {
       } catch (e) {
         const msg = e.message || '';
         if (msg.includes('NO_ROUTES_FOUND') || msg.includes('No routes found')) {
+          // Grace period: skip NO_ROUTES counting for 120s after buy
+          const posAge = pos.openedAt ? (Date.now() - new Date(pos.openedAt).getTime()) / 1000 : 999;
+          if (posAge < 120) {
+            console.log(`[AUTO] ${pos.symbol}: NO_ROUTES but grace period (${Math.round(posAge)}s < 120s), skipping`);
+            continue;
+          }
           const failCount = (pos.quoteFailCount || 0) + 1;
           if (failCount >= 3) {
               if (pos.isDryRun) {
