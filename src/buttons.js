@@ -279,7 +279,7 @@ async function handleCallbackQuery(cq) {
     const path = require('path');
     const file = isDry
       ? path.join(__dirname, '..', 'data', 'dry-run-closed.json')
-      : path.join(__dirname, '..', 'data', 'closed-positions.json');
+      : path.join(__dirname, '..', 'data', 'closed.json');
     try {
       fs.writeFileSync(file, '[]');
       const label = isDry ? 'Dry Run' : 'Live';
