@@ -153,7 +153,18 @@ async function autoBuy(tokenData) {
     } catch { /* fallback to 6 */ }
 
     const price = tokenData.price || 0;
-    const virtualTokenAmount = price > 0 ? (cfg.buyAmountSol / price) / Math.pow(10, decimals) : 0;
+    // Convert SOL to USD, then calculate token amount
+    // price = USD per token, buyAmountSol = SOL
+    if (!global._solPriceUsd || Date.now() - (global._solPriceTs || 0) > 60000) {
+      try {
+        const resp = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd');
+        const d = await resp.json();
+        global._solPriceUsd = d.solana.usd;
+        global._solPriceTs = Date.now();
+      } catch { global._solPriceUsd = global._solPriceUsd || 150; }
+    }
+    const solPriceUSD = global._solPriceUsd;
+    const virtualTokenAmount = price > 0 ? (cfg.buyAmountSol * solPriceUSD) / price : 0;
     const mc = tokenData.market_cap || tokenData.fdv || 0;
 
     const pos = dryRun.openDryPosition(mint, symbol, price, cfg.buyAmountSol, virtualTokenAmount, decimals, {
