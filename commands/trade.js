@@ -6,14 +6,21 @@ const { tgApi } = require('../lib/shared');
 const wallet = require('../src/wallet');
 const trading = require('../src/trading');
 const positions = require('../src/positions');
+const dryRun = require('../src/dry-run');
 const autotrade = require('../src/autotrade');
 const { positionButtons, configButtons, allPositionsButtons, mainMenu } = require('../src/buttons');
 
 // Resolve mint to canonical case from positions store (base58 is case-sensitive)
 function resolveMint(inputMint) {
-  const all = positions.loadPositions();
   const lower = inputMint.toLowerCase();
+  // Check live positions first
+  const all = positions.loadPositions();
   for (const key of Object.keys(all)) {
+    if (key.toLowerCase() === lower) return key;
+  }
+  // Then check dry run positions
+  const dryAll = dryRun.loadDryPositions();
+  for (const key of Object.keys(dryAll)) {
     if (key.toLowerCase() === lower) return key;
   }
   return inputMint; // fallback to user input
@@ -162,6 +169,29 @@ async function handleSell(chatId, args) {
   const mint = resolveMint(args[0]);
   const pct = parseFloat(args[1]) || 100;
 
+  // DRY RUN — virtual sell
+  const cfg = autotrade.getAutoConfig();
+  if (cfg.mode === 'dry_run') {
+    const pos = dryRun.getDryPosition(mint);
+    if (!pos) {
+      await tgApi('sendMessage', { chat_id: chatId, text: '⚠️ No dry run position found for this token.', parse_mode: 'HTML' });
+      return;
+    }
+    const tokensToSell = pos.remainingTokens * (pct / 100);
+    const virtualSol = tokensToSell * (pos.entryPrice || 0);
+    if (pct >= 100) {
+      dryRun.closeDryPosition(mint, 0, 'manual');
+    } else {
+      dryRun.recordDryPartialSell(mint, tokensToSell, virtualSol, `manual_${pct}pct`);
+    }
+    await tgApi('sendMessage', {
+      chat_id: chatId,
+      text: `🟡 <b>DRY RUN — Sell</b>\n\n📦 Would sell: ${tokensToSell.toFixed(2)} tokens (${pct}%)\n💰 Would get: ~${virtualSol.toFixed(4)} SOL`,
+      parse_mode: 'HTML',
+    });
+    return;
+  }
+
   try {
     await tgApi('sendMessage', { chat_id: chatId, text: `⏳ Selling ${pct}%...`, parse_mode: 'HTML' });
 
@@ -204,6 +234,24 @@ async function handleSellAll(chatId, args) {
     return;
   }
 
+  // DRY RUN — virtual sell all
+  const cfg = autotrade.getAutoConfig();
+  if (cfg.mode === 'dry_run') {
+    const mint = resolveMint(args[0]);
+    const pos = dryRun.getDryPosition(mint);
+    if (!pos) {
+      await tgApi('sendMessage', { chat_id: chatId, text: '⚠️ No dry run position found.', parse_mode: 'HTML' });
+      return;
+    }
+    const closed = dryRun.closeDryPosition(mint, 0, 'manual');
+    await tgApi('sendMessage', {
+      chat_id: chatId,
+      text: `🟡 <b>DRY RUN — Sell All</b>\n\n📊 PNL: ${closed.pnl >= 0 ? '+' : ''}${closed.pnl.toFixed(4)} SOL (${closed.pnlPct}%)`,
+      parse_mode: 'HTML',
+    });
+    return;
+  }
+
   try {
     await tgApi('sendMessage', { chat_id: chatId, text: `⏳ Selling all...`, parse_mode: 'HTML' });
     const mint = resolveMint(args[0]);
@@ -226,15 +274,19 @@ async function handleSellAll(chatId, args) {
 
 // ─── /positions — show open positions ──────────────────
 async function handlePositions(chatId) {
-  const open = positions.getOpenPositions();
+  const cfg = autotrade.getAutoConfig();
+  const isDryMode = cfg.mode === 'dry_run';
+  const open = isDryMode ? dryRun.getOpenDryPositions() : positions.getOpenPositions();
   if (!open.length) {
-    await tgApi('sendMessage', { chat_id: chatId, text: '📭 No open positions.', parse_mode: 'HTML' });
+    const emptyMsg = isDryMode ? '📭 No dry run positions.' : '📭 No open positions.';
+    await tgApi('sendMessage', { chat_id: chatId, text: emptyMsg, parse_mode: 'HTML' });
     return;
   }
 
   const { getQuote, SOL_MINT } = require('../src/trading');
   const gmgn = require('../lib/shared');
-  const lines = [`📋 <b>Open Positions</b> — ${open.length}\n`];
+  const header = isDryMode ? `🟡 <b>Dry Run Positions</b>` : `📋 <b>Open Positions</b>`;
+  const lines = [`${header} — ${open.length}\n`];
   for (const pos of open) {
     // Use Jupiter quote for accurate PNL (same as monitor)
     let currentPrice = 0;
@@ -333,8 +385,10 @@ async function handlePositions(chatId) {
 
 // ─── /pnl — show PNL summary ──────────────────────────
 async function handlePnl(chatId) {
-  const open = positions.getOpenPositions();
-  const closed = positions.getClosedPositions(100); // get all closed for totals
+  const cfg = autotrade.getAutoConfig();
+  const isDryMode = cfg.mode === 'dry_run';
+  const open = isDryMode ? dryRun.getOpenDryPositions() : positions.getOpenPositions();
+  const closed = isDryMode ? dryRun.getClosedDryPositions(100) : positions.getClosedPositions(100);
 
   let openPnl = 0;
 
@@ -371,7 +425,7 @@ async function handlePnl(chatId) {
   const recent = closed.slice(0, 10);
 
   const lines = [
-    `📊 <b>PNL Summary</b>`,
+    isDryMode ? `🟡 <b>PNL Summary — DRY RUN</b>` : `📊 <b>PNL Summary</b>`,
     ``,
     `🕐 All-Time: ${closed.length} trades`,
     `💰 Total PNL: ${totalClosedPnl >= 0 ? '+' : ''}${totalClosedPnl.toFixed(4)} SOL`,

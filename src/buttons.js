@@ -4,6 +4,7 @@
  */
 const { tgApi } = require('../lib/shared');
 const positions = require('../src/positions');
+const dryRun = require('../src/dry-run');
 const trading = require('../src/trading');
 const wallet = require('../src/wallet');
 
@@ -72,6 +73,7 @@ const MENU = {
   // Config buttons — click to input value manually
   config: (cfg) => [
     [{ text: cfg.enabled ? '🟢 Auto-Trade ON' : '🔴 Auto-Trade OFF', callback_data: 'cfg_toggle' }],
+    [{ text: cfg.mode === 'dry_run' ? '🟡 Mode: DRY RUN' : '🟢 Mode: LIVE', callback_data: 'cfg_mode_toggle' }],
     [{ text: `🟡 Soft SL: -${cfg.softSlPct || 15}%`, callback_data: 'cfg_input_softSlPct' },
      { text: `⏱ Wait: ${cfg.softSlWaitSec || 30}s`, callback_data: 'cfg_input_softSlWaitSec' }],
     [{ text: `🛑 Hard SL: -${cfg.hardSlPct || cfg.slPct || 40}%`, callback_data: 'cfg_input_hardSlPct' },
@@ -263,6 +265,7 @@ async function handleCallbackQuery(cq) {
 
   // ── Config toggle ──
   if (data === 'cfg_toggle') return cfgToggle(chatId, msgId, queryId);
+  if (data === 'cfg_mode_toggle') return cfgModeToggle(chatId, msgId, queryId);
 
   // ── Config input prompt ──
   const inputMatch = data.match(/^cfg_input_(.+)$/);
@@ -390,21 +393,23 @@ async function getQuoteSol(mint, remainingTokens, decimals) {
 
 async function sendMainMenu(chatId) {
   clearPendingInput(chatId);
-  const open = positions.getOpenPositions();
   const { getAutoConfig } = require('../src/autotrade');
   const cfg = getAutoConfig();
+  const isDryMode = cfg.mode === 'dry_run';
+  const open = isDryMode ? dryRun.getOpenDryPositions() : positions.getOpenPositions();
 
   const lines = [
-    `🤖 <b>GMGN Screener + Trader</b>`,
+    cfg.mode === 'dry_run' ? `🟡 <b>GMGN Screener — DRY RUN</b>` : `🤖 <b>GMGN Screener + Trader</b>`,
     ``,
     `📊 Positions: ${open.length}/${cfg.maxOpenPositions}`,
     `🤖 Auto-Trade: ${cfg.enabled ? '✅ ON' : '❌ OFF'}`,
+    cfg.mode === 'dry_run' ? `🟡 Mode: DRY RUN (no real trades)` : null,
     `💰 Buy: ${cfg.buyAmountSol} SOL | 🟡 Soft SL: -${cfg.softSlPct || 15}%/${cfg.softSlWaitSec || 30}s | 🛑 Hard SL: -${cfg.hardSlPct || cfg.slPct || 40}%`,
     `📉 Trail: ${cfg.trailingDropPct}% | 📊 Score: ${cfg.minScore}`,
     `📡 Source: ${cfg.screenerSource === 'trenches' ? '⛏️ Trenches' : '🔥 Trending'}`,
     ``,
     `Select option:`,
-  ];
+  ].filter(Boolean);
 
   await tgApi('sendMessage', {
     chat_id: chatId, text: lines.join('\n'),
@@ -419,10 +424,12 @@ async function sendPositionsMenu(chatId) {
   clearPendingInput(chatId);
   const { getAutoConfig } = require('../src/autotrade');
   const cfg = getAutoConfig();
-  const open = positions.getOpenPositions();
+  const isDryMode = cfg.mode === 'dry_run';
+  const open = isDryMode ? dryRun.getOpenDryPositions() : positions.getOpenPositions();
   console.log(`[POS] ${open.length} open positions`);
   if (!open.length) {
-    await tgApi('sendMessage', { chat_id: chatId, text: '📭 No open positions.', parse_mode: 'HTML', reply_markup: mainMenu() });
+    const emptyMsg = isDryMode ? '📭 No dry run positions.' : '📭 No open positions.';
+    await tgApi('sendMessage', { chat_id: chatId, text: emptyMsg, parse_mode: 'HTML', reply_markup: mainMenu() });
     return;
   }
 
@@ -533,6 +540,7 @@ async function sendConfigMenu(chatId) {
       `⚙️ <b>Config</b>`,
       ``,
       `🤖 Auto-Trade: ${cfg.enabled ? '✅ ON' : '❌ OFF'}`,
+      `🔄 Mode: ${cfg.mode === 'dry_run' ? '🟡 DRY RUN' : '🟢 LIVE'}`,
       `💰 Buy: ${cfg.buyAmountSol} SOL`,
       `🟡 Soft SL: -${cfg.softSlPct || 15}%/${cfg.softSlWaitSec || 30}s`,
       `🛑 Hard SL: -${cfg.hardSlPct || cfg.slPct || 40}%`,
@@ -918,6 +926,19 @@ async function cfgToggle(chatId, msgId, queryId) {
     reply_markup: JSON.stringify(configButtons(newCfg)),
   });
   await tgApi('answerCallbackQuery', { callback_query_id: queryId, text: `Auto-trade ${newCfg.enabled ? 'ON' : 'OFF'}` });
+}
+
+async function cfgModeToggle(chatId, msgId, queryId) {
+  const { getAutoConfig } = require('../src/autotrade');
+  const cfg = getAutoConfig();
+  const newMode = cfg.mode === 'dry_run' ? 'live' : 'dry_run';
+  require('../src/autotrade').updateAutoConfig({ mode: newMode });
+  const newCfg = getAutoConfig();
+  await tgApi('editMessageReplyMarkup', {
+    chat_id: chatId, message_id: msgId,
+    reply_markup: JSON.stringify(configButtons(newCfg)),
+  });
+  await tgApi('answerCallbackQuery', { callback_query_id: queryId, text: `Mode: ${newMode === 'dry_run' ? 'DRY RUN' : 'LIVE'}` });
 }
 
 async function cfgPromptInput(chatId, configKey) {

@@ -8,11 +8,13 @@ const { getTokenBalance } = require('./wallet');
 const { gmgnTokenInfo, sendTelegram } = require('../lib/shared');
 const { autoBuyButtons } = require('./buttons');
 const { checkBundlerPattern, saveBundlerDetection, isKnownBundlerToken } = require('./bundler-detector');
+const dryRun = require('./dry-run');
 const fs = require('fs');
 const path = require('path');
 
 const DEFAULT_CONFIG = {
   enabled: false,
+  mode: 'live',  // 'live' or 'dry_run'
   buyAmountSol: 0.05,
   slippageBps: 500,
   // 2-Layer SL
@@ -138,6 +140,57 @@ async function autoBuy(tokenData) {
 
   console.log(`[AUTO] Buying ${symbol} with ${cfg.buyAmountSol} SOL...`);
 
+  // DRY RUN MODE — virtual buy, no on-chain transaction
+  if (cfg.mode === 'dry_run') {
+    const price = tokenData.price || 0;
+    const virtualTokenAmount = price > 0 ? cfg.buyAmountSol / price : 0;
+    const mc = tokenData.market_cap || tokenData.fdv || 0;
+
+    const pos = dryRun.openDryPosition(mint, symbol, price, cfg.buyAmountSol, virtualTokenAmount, 6, {
+      slPct: cfg.hardSlPct || cfg.slPct,
+      trailingDropPct: cfg.trailingDropPct,
+      trailingTriggerPct: cfg.trailingTriggerPct,
+      trailingEnabled: true,
+      partialSells: partialSells.map(s => ({ ...s, sold: false, enabled: s.enabled !== false })),
+      mc,
+      gmgnSnapshot: {
+        holders: tokenData.holder_count || 0,
+        liquidity: tokenData.liquidity || 0,
+        top10: tokenData.top_10_holder_rate || 0,
+        creatorHold: 0,
+        entrapment: tokenData.entrapment_ratio || 0,
+        bundlerRate: tokenData.bundler_rate || 0,
+        volume: tokenData.volume_24h || tokenData.volume || 0,
+        buys: tokenData.buys_24h || tokenData.buys || 0,
+        sells: tokenData.sells_24h || tokenData.sells || 0,
+        snapshotAt: Date.now(),
+      },
+    });
+
+    const activePartials = partialSells.filter(s => s.enabled !== false);
+    const partialLines = activePartials.map(s => `• Sell ${s.sellPct}% at +${s.atPct}%`);
+    const allocatedPct = activePartials.reduce((sum, s) => sum + s.sellPct, 0);
+    const remainingPct = 100 - allocatedPct;
+    if (remainingPct > 0) partialLines.push(`• Remaining ${remainingPct}%: trailing TP (drop ${cfg.trailingDropPct}% from peak)`);
+
+    const fmtMc = (v) => v >= 1e6 ? `$${(v/1e6).toFixed(1)}M` : v >= 1e3 ? `$${(v/1e3).toFixed(0)}K` : `$${v}`;
+    await sendTelegram(
+      `🟡 <b>DRY RUN — Auto-Buy: ${symbol}</b>\n\n` +
+      `💰 Would spend: ${cfg.buyAmountSol} SOL\n` +
+      `📦 Would get: ~${virtualTokenAmount.toFixed(2)} tokens\n` +
+      `📊 Entry: ${price.toFixed(10)} SOL/token\n` +
+      `📈 MC: ${fmtMc(mc)}\n\n` +
+      `🎯 <b>Exit Strategy:</b>\n` +
+      partialLines.join('\n') + '\n' +
+      `• Soft SL: -${cfg.softSlPct}% (wait ${cfg.softSlWaitSec}s)\n` +
+      `• Hard SL: -${cfg.hardSlPct}%\n\n` +
+      `🔗 <a href="https://gmgn.ai/sol/token/${mint}">GMGN</a>`,
+      { reply_markup: autoBuyButtons(mint) }
+    );
+
+    return pos;
+  }
+
   try {
     const result = await buyToken(mint, cfg.buyAmountSol, cfg.walletLabel, cfg.slippageBps);
 
@@ -224,13 +277,43 @@ async function autoBuy(tokenData) {
 
 // ─── Execute Partial Sell ──────────────────────────────
 async function executePartialSell(pos, partial, currentPrice) {
+  const isDry = pos.isDryRun === true;
+
   // Reload position from disk to get latest remainingTokens
   const positions = require('./positions');
-  const freshPos = positions.getPosition(pos.tokenMint) || pos;
+  const freshPos = isDry
+    ? (dryRun.getDryPosition(pos.tokenMint) || pos)
+    : (positions.getPosition(pos.tokenMint) || pos);
   const tokensToSell = freshPos.remainingTokens * (partial.sellPct / 100);
   if (tokensToSell <= 0) return;
 
   console.log(`[AUTO] Partial sell ${partial.sellPct}% of ${freshPos.symbol} at +${partial.atPct}% (${tokensToSell.toFixed(2)} tokens)`);
+
+  // DRY RUN — virtual partial sell
+  if (isDry) {
+    const virtualSol = tokensToSell * currentPrice;
+    const newPos = dryRun.recordDryPartialSell(freshPos.tokenMint, tokensToSell, virtualSol, `partial_${partial.atPct}`);
+
+    const curPos = dryRun.getDryPosition(freshPos.tokenMint);
+    if (curPos) {
+      const updatedPartials = curPos.partialSells.map(s =>
+        s.atPct === partial.atPct ? { ...s, sold: true, txSig: 'DRY_RUN' } : s
+      );
+      dryRun.updateDryPosition(freshPos.tokenMint, { partialSells: updatedPartials });
+    }
+
+    const updatedPos = dryRun.getDryPosition(freshPos.tokenMint) || newPos || freshPos;
+    const pnl = dryRun.calcDryPnl(updatedPos, currentPrice);
+    await sendTelegram(
+      `🟡 <b>DRY RUN — Partial Sell: ${freshPos.symbol} (+${partial.atPct}%)</b>\n\n` +
+      `📦 Would sell: ${tokensToSell.toFixed(2)} tokens (${partial.sellPct}%)\n` +
+      `💰 Would get: ~${virtualSol.toFixed(4)} SOL\n` +
+      `📊 Remaining: ${updatedPos.remainingTokens.toFixed(2)} tokens\n` +
+      `📈 PNL: ${pnl.pnl >= 0 ? '+' : ''}${pnl.pnl.toFixed(4)} SOL (${pnl.pnlPct}%)`,
+      { reply_markup: autoBuyButtons(freshPos.tokenMint) }
+    );
+    return;
+  }
 
   try {
     const result = await sellToken(freshPos.tokenMint, tokensToSell, freshPos.decimals, autoConfig.walletLabel, 500);
@@ -267,6 +350,29 @@ async function executePartialSell(pos, partial, currentPrice) {
 // ─── Execute Full Exit (trailing/SL) ───────────────────
 async function executeFullExit(pos, reason, pnlResult) {
   console.log(`[AUTO] Full exit ${pos.symbol} (${reason})`);
+
+  // DRY RUN — virtual full exit
+  if (pos.isDryRun) {
+    const virtualSol = pos.remainingTokens * (pnlResult.pnl / pos.solSpent + 1) * pos.solSpent;
+    const closed = dryRun.closeDryPosition(pos.tokenMint, 0, reason);
+
+    const isRug = closed.pnlPct <= -80;
+    const emoji = closed.pnl >= 0 ? '🟢' : (isRug ? '💀' : '🔴');
+    const header = isRug ? `💀 <b>DRY RUN — RUG — ${pos.symbol}</b>` : `${emoji} <b>DRY RUN — Auto-Sell (${reason}): ${pos.symbol}</b>`;
+    await sendTelegram(
+      `${header}\n\n` +
+      `💰 Would get: ~${(pos.remainingTokens * (closed.solReceived / pos.solSpent + 1) * pos.solSpent).toFixed(4)} SOL\n` +
+      `📊 PNL: ${closed.pnl >= 0 ? '+' : ''}${closed.pnl.toFixed(4)} SOL (${closed.pnlPct}%)\n` +
+      `📝 Reason: ${reason}\n` +
+      `📈 Peak was: +${pos.peakPnlPct ?? '?'}%`,
+      { reply_markup: { inline_keyboard: [
+        [{ text: '📊 Positions', callback_data: 'menu_positions' },
+         { text: '📈 PNL', callback_data: 'menu_pnl' }],
+        [{ text: '🏠 Menu', callback_data: 'menu_main' }],
+      ]} }
+    );
+    return;
+  }
 
   try {
     const result = await sellAll(pos.tokenMint, autoConfig.walletLabel, 500);
@@ -384,7 +490,8 @@ async function checkRugSignals(pos) {
 
 // ─── Check All Positions ───────────────────────────────
 async function checkPositions() {
-  const positions = getOpenPositions();
+  const isDryMode = autoConfig.mode === 'dry_run';
+  const positions = isDryMode ? dryRun.getOpenDryPositions() : getOpenPositions();
   if (!positions.length) return;
 
   for (let i = 0; i < positions.length; i++) {
@@ -392,22 +499,24 @@ async function checkPositions() {
     // Delay between position checks to avoid rate limiting
     if (i > 0) await new Promise(r => setTimeout(r, 2000));
     try {
-      // Safeguard: if wallet balance is 0, auto-close (tokens already gone)
-      const { getTokenBalance } = require('./wallet');
-      const walletBal = await getTokenBalance(pos.tokenMint);
-      if (walletBal.amount <= 0) {
-        const { closePosition } = require('./positions');
-        const totalReceived = pos.totalSolReceived || 0;
-        const pnl = totalReceived - (pos.solSpent || 0);
-        closePosition(pos.tokenMint, totalReceived, 'none', 'wallet_empty');
-        console.log(`[AUTO] 🧹 ${pos.symbol}: wallet empty, auto-closed (PNL: ${pnl.toFixed(4)} SOL)`);
-        sendTelegram(
-          `🧹 <b>Auto-Closed: ${pos.symbol}</b>\n\n` +
-          `📊 Reason: Wallet balance = 0 (tokens already sold)\n` +
-          `💰 PNL: ${pnl >= 0 ? '+' : ''}${pnl.toFixed(4)} SOL`,
-          { parse_mode: 'HTML' }
-        ).catch(() => {});
-        continue;
+      // LIVE MODE ONLY: wallet balance safeguard
+      if (!pos.isDryRun) {
+        const { getTokenBalance } = require('./wallet');
+        const walletBal = await getTokenBalance(pos.tokenMint);
+        if (walletBal.amount <= 0) {
+          const { closePosition } = require('./positions');
+          const totalReceived = pos.totalSolReceived || 0;
+          const pnl = totalReceived - (pos.solSpent || 0);
+          closePosition(pos.tokenMint, totalReceived, 'none', 'wallet_empty');
+          console.log(`[AUTO] 🧹 ${pos.symbol}: wallet empty, auto-closed (PNL: ${pnl.toFixed(4)} SOL)`);
+          sendTelegram(
+            `🧹 <b>Auto-Closed: ${pos.symbol}</b>\n\n` +
+            `📊 Reason: Wallet balance = 0 (tokens already sold)\n` +
+            `💰 PNL: ${pnl >= 0 ? '+' : ''}${pnl.toFixed(4)} SOL`,
+            { parse_mode: 'HTML' }
+          ).catch(() => {});
+          continue;
+        }
       }
       // Use Jupiter quote for accurate PNL (GMGN price is USD and unreliable for new tokens)
       let currentPrice = 0;
@@ -417,29 +526,29 @@ async function checkPositions() {
         const rawAmount = Math.floor(pos.remainingTokens * Math.pow(10, pos.decimals));
         const quote = await getQuote(pos.tokenMint, SOL_MINT, rawAmount, 500);
         quoteSolOut = parseFloat(quote.outAmount) / 1e9;
-        // Derive per-token price in SOL from the quote
         currentPrice = pos.remainingTokens > 0 ? quoteSolOut / pos.remainingTokens : 0;
-        // Reset fail count on success
         if (pos.quoteFailCount > 0) {
-          const { updatePosition } = require('./positions');
-          updatePosition(pos.tokenMint, { quoteFailCount: 0 });
+          if (pos.isDryRun) dryRun.updateDryPosition(pos.tokenMint, { quoteFailCount: 0 });
+          else { const { updatePosition } = require('./positions'); updatePosition(pos.tokenMint, { quoteFailCount: 0 }); }
         }
       } catch (e) {
         const msg = e.message || '';
-        // Auto-close dead tokens (no routes = token is dead/rugged)
         if (msg.includes('NO_ROUTES_FOUND') || msg.includes('No routes found')) {
           const failCount = (pos.quoteFailCount || 0) + 1;
           if (failCount >= 3) {
-              // 3 consecutive failures = auto-close
-              const { closePosition } = require('./positions');
-              closePosition(pos.tokenMint, 0, 'none', 'dead_token');
+              if (pos.isDryRun) {
+                dryRun.closeDryPosition(pos.tokenMint, 0, 'dead_token');
+              } else {
+                const { closePosition } = require('./positions');
+                closePosition(pos.tokenMint, 0, 'none', 'dead_token');
+              }
               console.log(`[AUTO] 💀 ${pos.symbol}: dead token (NO_ROUTES x3), auto-closed`);
-              // Send rug alert notification — account for partial sells
               const totalReceived = pos.totalSolReceived || 0;
               const actualLoss = (pos.solSpent || 0) - totalReceived;
               const lossPct = pos.solSpent > 0 ? ((actualLoss / pos.solSpent) * 100) : 100;
+              const rugPrefix = pos.isDryRun ? '🟡 <b>DRY RUN —' : '💀 <b>';
               const rugMsg = [
-                `💀 <b>RUG DETECTED</b>`,
+                `${rugPrefix} RUG DETECTED</b>`,
                 ``,
                 `Token: <b>${pos.symbol || 'Unknown'}</b>`,
                 `CA: <code>${pos.tokenMint}</code>`,
@@ -447,19 +556,15 @@ async function checkPositions() {
                 totalReceived > 0 ? `Recovered: ${totalReceived.toFixed(4)} SOL (partial sells)` : null,
                 `Loss: <b>-${actualLoss.toFixed(4)} SOL (-${lossPct.toFixed(1)}%)</b>`,
                 `Reason: NO_ROUTES_FOUND x3 — token dead`,
-                ``,
-                `Position auto-closed.`,
               ].filter(Boolean).join('\n');
               sendTelegram(rugMsg, { parse_mode: 'HTML' }).catch(() => {});
               continue;
           }
-          // Track failure count
-          const { updatePosition } = require('./positions');
-          updatePosition(pos.tokenMint, { quoteFailCount: failCount });
+          if (pos.isDryRun) dryRun.updateDryPosition(pos.tokenMint, { quoteFailCount: failCount });
+          else { const { updatePosition } = require('./positions'); updatePosition(pos.tokenMint, { quoteFailCount: failCount }); }
           console.log(`[AUTO] ${pos.symbol}: NO_ROUTES (${failCount}/3)`);
           continue;
         }
-        // Rate limit or other error — just skip, don't spam
         if (msg.includes('429') || msg.includes('Too many requests')) {
           continue;
         }
@@ -480,7 +585,8 @@ async function checkPositions() {
       if (now - lastBundlerCheck > 30000) {
         try {
           const bundlerResult = await checkBundlerPattern(pos.tokenMint, pos.mc || 0, pos.symbol);
-          updatePosition(pos.tokenMint, { lastBundlerCheck: now });
+          if (pos.isDryRun) dryRun.updateDryPosition(pos.tokenMint, { lastBundlerCheck: now });
+          else updatePosition(pos.tokenMint, { lastBundlerCheck: now });
           
           // Save detection for learning (even if not bundler)
           saveBundlerDetection(pos.tokenMint, pos.symbol, bundlerResult);
@@ -504,22 +610,30 @@ async function checkPositions() {
             ].join('\n');
             sendTelegram(bundlerMsg, { parse_mode: 'HTML' }).catch(() => {});
             
-            // Auto-sell
-            try {
-              const result = await sellAll(pos.tokenMint, autoConfig.walletLabel, 500);
-              if (result.success) {
-                const closed = closePosition(pos.tokenMint, result.outputSol, result.signature, 'bundler_detected');
-                const emoji = closed.pnl >= 0 ? '🟢' : '🔴';
-                await sendTelegram(
-                  `${emoji} <b>Auto-Sell (Bundler): ${pos.symbol}</b>\n\n` +
-                  `💰 Got: ${result.outputSol.toFixed(4)} SOL\n` +
-                  `📊 PNL: ${closed.pnl >= 0 ? '+' : ''}${closed.pnl.toFixed(4)} SOL (${closed.pnlPct}%)\n` +
-                  `📝 Reason: Bundler pattern detected\n` +
-                  `🔗 <a href="https://solscan.io/tx/${result.signature}">TX</a>`
-                );
+            if (pos.isDryRun) {
+              const closed = dryRun.closeDryPosition(pos.tokenMint, 0, 'bundler_detected');
+              await sendTelegram(
+                `🟡 <b>DRY RUN — Auto-Sell (Bundler): ${pos.symbol}</b>\n\n` +
+                `📊 PNL: ${closed.pnl >= 0 ? '+' : ''}${closed.pnl.toFixed(4)} SOL (${closed.pnlPct}%)\n` +
+                `📝 Reason: Bundler pattern detected`
+              );
+            } else {
+              try {
+                const result = await sellAll(pos.tokenMint, autoConfig.walletLabel, 500);
+                if (result.success) {
+                  const closed = closePosition(pos.tokenMint, result.outputSol, result.signature, 'bundler_detected');
+                  const emoji = closed.pnl >= 0 ? '🟢' : '🔴';
+                  await sendTelegram(
+                    `${emoji} <b>Auto-Sell (Bundler): ${pos.symbol}</b>\n\n` +
+                    `💰 Got: ${result.outputSol.toFixed(4)} SOL\n` +
+                    `📊 PNL: ${closed.pnl >= 0 ? '+' : ''}${closed.pnl.toFixed(4)} SOL (${closed.pnlPct}%)\n` +
+                    `📝 Reason: Bundler pattern detected\n` +
+                    `🔗 <a href="https://solscan.io/tx/${result.signature}">TX</a>`
+                  );
+                }
+              } catch (sellErr) {
+                console.error(`[AUTO] Bundler sell failed: ${sellErr.message}`);
               }
-            } catch (sellErr) {
-              console.error(`[AUTO] Bundler sell failed: ${sellErr.message}`);
             }
             continue;
           }
@@ -535,7 +649,8 @@ async function checkPositions() {
       if (rugCheckNow - lastRugCheck > 30000 && pos.gmgnSnapshot) {
         try {
           const rugResult = await checkRugSignals(pos);
-          updatePosition(pos.tokenMint, { lastRugCheck: rugCheckNow });
+          if (pos.isDryRun) dryRun.updateDryPosition(pos.tokenMint, { lastRugCheck: rugCheckNow });
+          else updatePosition(pos.tokenMint, { lastRugCheck: rugCheckNow });
 
           if (rugResult.isRug) {
             console.log(`[AUTO] 🚨 ${pos.symbol}: RUG DETECTED — ${rugResult.signals.join(', ')}`);
@@ -556,22 +671,30 @@ async function checkPositions() {
             ].join('\n');
             sendTelegram(rugAlertMsg, { parse_mode: 'HTML' }).catch(() => {});
 
-            // Auto-sell
-            try {
-              const result = await sellAll(pos.tokenMint, autoConfig.walletLabel, 500);
-              if (result.success) {
-                const closed = closePosition(pos.tokenMint, result.outputSol, result.signature, 'rug_signal');
-                const emoji = closed.pnl >= 0 ? '🟢' : '🔴';
-                await sendTelegram(
-                  `${emoji} <b>Auto-Sell (Rug Signal): ${pos.symbol}</b>\n\n` +
-                  `💰 Got: ${result.outputSol.toFixed(4)} SOL\n` +
-                  `📊 PNL: ${closed.pnl >= 0 ? '+' : ''}${closed.pnl.toFixed(4)} SOL (${closed.pnlPct}%)\n` +
-                  `📝 Reason: ${rugResult.signals.join(', ')}\n` +
-                  `🔗 <a href="https://solscan.io/tx/${result.signature}">TX</a>`
-                );
+            if (pos.isDryRun) {
+              const closed = dryRun.closeDryPosition(pos.tokenMint, 0, 'rug_signal');
+              await sendTelegram(
+                `🟡 <b>DRY RUN — Auto-Sell (Rug Signal): ${pos.symbol}</b>\n\n` +
+                `📊 PNL: ${closed.pnl >= 0 ? '+' : ''}${closed.pnl.toFixed(4)} SOL (${closed.pnlPct}%)\n` +
+                `📝 Reason: ${rugResult.signals.join(', ')}`
+              );
+            } else {
+              try {
+                const result = await sellAll(pos.tokenMint, autoConfig.walletLabel, 500);
+                if (result.success) {
+                  const closed = closePosition(pos.tokenMint, result.outputSol, result.signature, 'rug_signal');
+                  const emoji = closed.pnl >= 0 ? '🟢' : '🔴';
+                  await sendTelegram(
+                    `${emoji} <b>Auto-Sell (Rug Signal): ${pos.symbol}</b>\n\n` +
+                    `💰 Got: ${result.outputSol.toFixed(4)} SOL\n` +
+                    `📊 PNL: ${closed.pnl >= 0 ? '+' : ''}${closed.pnl.toFixed(4)} SOL (${closed.pnlPct}%)\n` +
+                    `📝 Reason: ${rugResult.signals.join(', ')}\n` +
+                    `🔗 <a href="https://solscan.io/tx/${result.signature}">TX</a>`
+                  );
+                }
+              } catch (sellErr) {
+                console.error(`[AUTO] Rug sell failed: ${sellErr.message}`);
               }
-            } catch (sellErr) {
-              console.error(`[AUTO] Rug sell failed: ${sellErr.message}`);
             }
             continue;
           }
@@ -594,15 +717,15 @@ async function checkPositions() {
           `Massive dump detected! SL will trigger soon.`,
         ].join('\n');
         sendTelegram(rugWarnMsg, { parse_mode: 'HTML' }).catch(() => {});
-        updatePosition(pos.tokenMint, { rugWarningSent: true });
+        if (pos.isDryRun) dryRun.updateDryPosition(pos.tokenMint, { rugWarningSent: true });
+        else updatePosition(pos.tokenMint, { rugWarningSent: true });
         console.log(`[AUTO] 🚨 ${pos.symbol}: RUG WARNING sent (PNL ${pnlPct.toFixed(1)}%)`);
       }
       // Update peak
       if (currentPrice > (pos.peakPrice || 0)) {
-        updatePosition(pos.tokenMint, {
-          peakPrice: currentPrice,
-          peakPnlPct: parseFloat(pnlPct.toFixed(1)),
-        });
+        const peakUpdate = { peakPrice: currentPrice, peakPnlPct: parseFloat(pnlPct.toFixed(1)) };
+        if (pos.isDryRun) dryRun.updateDryPosition(pos.tokenMint, peakUpdate);
+        else updatePosition(pos.tokenMint, peakUpdate);
       }
 
       const actions = [];
@@ -639,7 +762,8 @@ async function checkPositions() {
         const now = Date.now();
         if (!pos.softSlTriggeredAt) {
           // First time hitting soft SL — start timer
-          updatePosition(pos.tokenMint, { softSlTriggeredAt: now });
+          if (pos.isDryRun) dryRun.updateDryPosition(pos.tokenMint, { softSlTriggeredAt: now });
+          else updatePosition(pos.tokenMint, { softSlTriggeredAt: now });
           console.log(`[AUTO] ${pos.symbol}: Soft SL triggered (${pnlPct.toFixed(1)}% <= -${softSlPct}%), waiting ${softSlWaitSec}s for recovery...`);
           sendTelegram(
             `⚠️ <b>Soft SL Warning: ${pos.symbol}</b>\n\n` +
@@ -660,7 +784,8 @@ async function checkPositions() {
       } else {
         // PNL recovered above soft SL — reset timer
         if (pos.softSlTriggeredAt) {
-          updatePosition(pos.tokenMint, { softSlTriggeredAt: null });
+          if (pos.isDryRun) dryRun.updateDryPosition(pos.tokenMint, { softSlTriggeredAt: null });
+          else updatePosition(pos.tokenMint, { softSlTriggeredAt: null });
           console.log(`[AUTO] ${pos.symbol}: Soft SL recovered! (${pnlPct.toFixed(1)}% > -${softSlPct}%)`);
           sendTelegram(
             `✅ <b>Soft SL Recovered: ${pos.symbol}</b>\n\n` +
@@ -698,7 +823,8 @@ function startMonitor() {
   monitoring = true;
   loadAutoConfig();
 
-  console.log(`[AUTO] Monitor started (check every ${autoConfig.checkIntervalSec}s, trailing ${autoConfig.trailingDropPct}% from peak, Soft SL:-${autoConfig.softSlPct}%/${autoConfig.softSlWaitSec}s, Hard SL:-${autoConfig.hardSlPct}%)`);
+  const modeTag = autoConfig.mode === 'dry_run' ? ' [DRY RUN]' : ' [LIVE]';
+  console.log(`[AUTO] Monitor started${modeTag} (check every ${autoConfig.checkIntervalSec}s, trailing ${autoConfig.trailingDropPct}% from peak, Soft SL:-${autoConfig.softSlPct}%/${autoConfig.softSlWaitSec}s, Hard SL:-${autoConfig.hardSlPct}%)`);
 
   // Use setTimeout loop so interval changes via /config take effect without restart
   async function tick() {
