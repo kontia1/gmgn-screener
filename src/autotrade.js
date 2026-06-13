@@ -141,6 +141,7 @@ async function autoBuy(tokenData) {
   console.log(`[AUTO] Buying ${symbol} with ${cfg.buyAmountSol} SOL...`);
 
   // DRY RUN MODE — virtual buy, no on-chain transaction
+  // Uses same Jupiter quote as live mode for accurate pricing
   if (cfg.mode === 'dry_run') {
     // Fetch actual decimals from on-chain (cached, fallback to 6)
     let decimals = 6;
@@ -152,19 +153,27 @@ async function autoBuy(tokenData) {
       decimals = mintInfo.decimals;
     } catch { /* fallback to 6 */ }
 
-    const price = tokenData.price || 0;
-    // Convert SOL to USD, then calculate token amount
-    // price = USD per token, buyAmountSol = SOL
-    if (!global._solPriceUsd || Date.now() - (global._solPriceTs || 0) > 60000) {
-      try {
-        const resp = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd');
-        const d = await resp.json();
-        global._solPriceUsd = d.solana.usd;
-        global._solPriceTs = Date.now();
-      } catch { global._solPriceUsd = global._solPriceUsd || 150; }
+    // Get Jupiter quote — same as live mode
+    const { getQuote, SOL_MINT } = require('./trading');
+    const lamports = Math.floor(cfg.buyAmountSol * 1e9);
+    let virtualTokenAmount = 0;
+    let price = 0;
+    try {
+      const quote = await getQuote(SOL_MINT, mint, lamports, cfg.slippageBps || 500);
+      const rawOutput = parseFloat(quote.outAmount || '0');
+      virtualTokenAmount = rawOutput / Math.pow(10, decimals);
+      price = virtualTokenAmount > 0 ? cfg.buyAmountSol / virtualTokenAmount : 0;
+      console.log(`[AUTO] DRY RUN quote: ${virtualTokenAmount.toFixed(2)} tokens @ ${price.toFixed(10)} SOL/token`);
+    } catch (e) {
+      console.log(`[AUTO] DRY RUN Jupiter quote failed: ${e.message.slice(0, 60)}, skipping buy`);
+      return null;
     }
-    const solPriceUSD = global._solPriceUsd;
-    const virtualTokenAmount = price > 0 ? (cfg.buyAmountSol * solPriceUSD) / price : 0;
+
+    if (virtualTokenAmount <= 0) {
+      console.log(`[AUTO] DRY RUN: Jupiter returned 0 tokens, skipping`);
+      return null;
+    }
+
     const mc = tokenData.market_cap || tokenData.fdv || 0;
 
     const pos = dryRun.openDryPosition(mint, symbol, price, cfg.buyAmountSol, virtualTokenAmount, decimals, {
