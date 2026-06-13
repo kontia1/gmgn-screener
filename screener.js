@@ -6,6 +6,7 @@
 const { gmgn, sendTelegram, fmtPrice, fmtMc } = require('./lib/shared');
 const { autoBuy, getAutoConfig } = require('./src/autotrade');
 const { alertButtons } = require('./src/buttons');
+const { checkGlobalDedup, setGlobalDedup, applySignalAdjustment, getSignalConfig, runSignalScan } = require('./src/signal-scanner');
 const fs = require('fs');
 const path = require('path');
 
@@ -283,12 +284,38 @@ async function runScan() {
 
     if (seen[addr]) { stats.seen++; continue; }
 
-    const { score, reasons } = scoreToken(t, ageMin);
+    // Global dedup check (prevents same token from trending+trenches+signal)
+    const globalDedup = checkGlobalDedup(addr);
+    if (globalDedup) {
+      const ageSec = Math.round((Date.now() - globalDedup.firstSeen) / 1000);
+      console.log(`  [DEDUP] ${t.symbol} skipped by global dedup (first: ${globalDedup.firstSource}, ${ageSec}s ago)`);
+      stats.seen++;
+      continue;
+    }
+
+    const { score: baseScore, reasons } = scoreToken(t, ageMin);
     const cfg = getAutoConfig();
-    if (score < Math.max(35, cfg.minScore || 40)) { stats.score++; continue; }
+
+    // Signal adjustment (independent of base score)
+    let finalScore = baseScore;
+    let signalMeta = null;
+    const signalCfg = getSignalConfig();
+    if (signalCfg.enabled && t._activeSignals) {
+      const signalResult = applySignalAdjustment(t, baseScore, t._activeSignals, signalCfg);
+      finalScore = signalResult.displayScore;
+      signalMeta = signalResult.signalMeta;
+      if (signalMeta.hardReject) {
+        console.log(`  [SIGNAL] ${t.symbol} HARD REJECTED (type ${signalMeta.hardRejectType})`);
+        continue;
+      }
+      console.log(`  [SIGNAL] ${t.symbol} base:${baseScore} signal:+${signalMeta.appliedSignal} penalty:-${signalMeta.penalty} final:${finalScore}`);
+    }
+
+    if (finalScore < Math.max(35, cfg.minScore || 40)) { stats.score++; continue; }
 
     t._ageMin = ageMin;
-    console.log(`  ✅ ${t.symbol} | Score:${score} | MC:${fmtMc(mc)} | Age:${ageMin}min`);
+    const scoreDisplay = signalMeta ? `${finalScore} (base:${baseScore}+${signalMeta.appliedSignal})` : `${baseScore}`;
+    console.log(`  ✅ ${t.symbol} | Score:${scoreDisplay} | MC:${fmtMc(mc)} | Age:${ageMin}min`);
 
     // For trenches tokens with no price data, fetch from token info API
     if (source === 'trenches' && (!t.price || t.price === 0)) {
@@ -309,17 +336,37 @@ async function runScan() {
       } catch (e) { console.log(`  [INFO] ${t.symbol} price enrichment failed: ${e.message}`); }
     }
 
-    try { await sendTelegram(formatAlert(t, score, reasons), { reply_markup: alertButtons(addr) }); } catch (e) { console.error(`[TG] Failed: ${e.message}`); }
+    // Build alert with signal info
+    let alertText = formatAlert(t, finalScore, reasons);
+    if (signalMeta && signalMeta.appliedSignal > 0) {
+      const signalLines = signalMeta.activeSignals
+        .filter(type => (signalCfg.signalWeights[type] || 0) > 0)
+        .map(type => {
+          const weight = signalCfg.signalWeights[type];
+          const reduced = signalMeta.antiDoubleCount[`type${type}`] || 0;
+          const actual = weight - reduced;
+          const name = SIGNAL_NAMES[type] || `Type ${type}`;
+          return reduced > 0
+            ? `• ${name} (+${actual.toFixed(0)}, reduced from +${weight})`
+            : `• ${name} (+${weight})`;
+        });
+      if (signalLines.length) {
+        alertText += `\n\n📡 <b>Signals:</b>\n${signalLines.join('\n')}`;
+      }
+    }
+    try { await sendTelegram(alertText, { reply_markup: alertButtons(addr) }); } catch (e) { console.error(`[TG] Failed: ${e.message}`); }
     // Auto-buy if enabled
-    t._score = score;
+    t._score = finalScore;
+    t._signalMeta = signalMeta;
     try { await autoBuy(t); } catch (e) { console.error(`[AUTO] ${t.symbol}: ${e.message}`); }
 
     seen[addr] = {
-      ts: Date.now(), score, symbol: t.symbol,
+      ts: Date.now(), score: finalScore, symbol: t.symbol,
       name: t.name || t.symbol, price: t.price || 0,
       mc, vol, holders: t.holder_count || 0, ageMin,
       reasons, phase: 2,
     };
+    setGlobalDedup(addr, source);
     count++;
   }
 
@@ -332,4 +379,26 @@ if (require.main === module) {
   runScan().then(() => process.exit(0)).catch(e => { console.error(e); process.exit(1); });
 }
 
-module.exports = { runScan, loadSeen, getSeenFile };
+// Signal type names for display
+const SIGNAL_NAMES = {
+  1: 'Price Spike',
+  2: 'Price Dump',
+  3: 'Volume Spike',
+  4: 'Large Buy',
+  5: 'Large Sell',
+  6: 'Smart Money Buy',
+  7: 'Smart Money Sell',
+  8: 'KOL Buy',
+  9: 'KOL Sell',
+  10: 'New Wallet Influx',
+  11: 'Holder Surge',
+  12: 'Liquidity Add',
+  13: 'Liquidity Remove',
+  14: 'Sniper Activity',
+  15: 'Multi-Signal',
+  16: 'Social Spike',
+  17: 'Dev Activity',
+  18: 'Rug Warning',
+};
+
+module.exports = { runScan, loadSeen, getSeenFile, scoreToken, SIGNAL_NAMES };
