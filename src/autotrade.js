@@ -143,7 +143,7 @@ async function autoBuy(tokenData) {
   // DRY RUN MODE — virtual buy, no on-chain transaction
   if (cfg.mode === 'dry_run') {
     const price = tokenData.price || 0;
-    const virtualTokenAmount = price > 0 ? cfg.buyAmountSol / price : 0;
+    const virtualTokenAmount = price > 0 ? (cfg.buyAmountSol / price) / Math.pow(10, 6) : 0;
     const mc = tokenData.market_cap || tokenData.fdv || 0;
 
     const pos = dryRun.openDryPosition(mint, symbol, price, cfg.buyAmountSol, virtualTokenAmount, 6, {
@@ -353,15 +353,15 @@ async function executeFullExit(pos, reason, pnlResult) {
 
   // DRY RUN — virtual full exit
   if (pos.isDryRun) {
-    const virtualSol = pos.remainingTokens * (pnlResult.pnl / pos.solSpent + 1) * pos.solSpent;
     const closed = dryRun.closeDryPosition(pos.tokenMint, 0, reason);
+    const virtualSol = pos.solSpent + closed.pnl;
 
     const isRug = closed.pnlPct <= -80;
     const emoji = closed.pnl >= 0 ? '🟢' : (isRug ? '💀' : '🔴');
-    const header = isRug ? `💀 <b>DRY RUN — RUG — ${pos.symbol}</b>` : `${emoji} <b>DRY RUN — Auto-Sell (${reason}): ${pos.symbol}</b>`;
+    const header = isRug ? `🟡 <b>DRY RUN — RUG — ${pos.symbol}</b>` : `${emoji} <b>DRY RUN — Auto-Sell (${reason}): ${pos.symbol}</b>`;
     await sendTelegram(
       `${header}\n\n` +
-      `💰 Would get: ~${(pos.remainingTokens * (closed.solReceived / pos.solSpent + 1) * pos.solSpent).toFixed(4)} SOL\n` +
+      `💰 Would get: ~${virtualSol.toFixed(4)} SOL\n` +
       `📊 PNL: ${closed.pnl >= 0 ? '+' : ''}${closed.pnl.toFixed(4)} SOL (${closed.pnlPct}%)\n` +
       `📝 Reason: ${reason}\n` +
       `📈 Peak was: +${pos.peakPnlPct ?? '?'}%`,
@@ -705,8 +705,9 @@ async function checkPositions() {
 
       // Rug warning — PNL dropped below -90% (massive dump)
       if (pnlPct <= -90 && !pos.rugWarningSent) {
+        const rugPrefix = pos.isDryRun ? '🟡 <b>DRY RUN — RUG WARNING</b>' : '🚨 <b>RUG WARNING</b>';
         const rugWarnMsg = [
-          `🚨 <b>RUG WARNING</b>`,
+          rugPrefix,
           ``,
           `Token: <b>${pos.symbol || 'Unknown'}</b>`,
           `CA: <code>${pos.tokenMint}</code>`,
