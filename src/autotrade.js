@@ -533,6 +533,7 @@ async function checkPositions() {
       // Use Jupiter quote for accurate PNL (GMGN price is USD and unreliable for new tokens)
       let currentPrice = 0;
       let quoteSolOut = 0;
+      let priceSource = 'jupiter';
       try {
         const { getQuote, SOL_MINT } = require('./trading');
         const rawAmount = Math.floor(pos.remainingTokens * Math.pow(10, pos.decimals));
@@ -546,48 +547,69 @@ async function checkPositions() {
       } catch (e) {
         const msg = e.message || '';
         if (msg.includes('NO_ROUTES_FOUND') || msg.includes('No routes found')) {
-          // Grace period: skip NO_ROUTES counting for 120s after buy
-          const posAge = pos.openedAt ? (Date.now() - new Date(pos.openedAt).getTime()) / 1000 : 999;
-          if (posAge < 120) {
-            console.log(`[AUTO] ${pos.symbol}: NO_ROUTES but grace period (${Math.round(posAge)}s < 120s), skipping`);
+          // Fallback: try GMGN price when Jupiter has no routes
+          try {
+            const gmgnData = await gmgnTokenInfo(pos.tokenMint);
+            const gmgnPriceUSD = parseFloat(gmgnData?.price?.price || 0);
+            if (gmgnPriceUSD > 0) {
+              // Get SOL price from GMGN (fetch once per cycle, cached)
+              if (!global._solPriceUsd || Date.now() - (global._solPriceTs || 0) > 60000) {
+                const resp = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd');
+                const d = await resp.json();
+                global._solPriceUsd = d.solana.usd;
+                global._solPriceTs = Date.now();
+              }
+              const currentPriceSOL = gmgnPriceUSD / global._solPriceUsd;
+              quoteSolOut = currentPriceSOL * pos.remainingTokens;
+              currentPrice = currentPriceSOL;
+              priceSource = 'gmgn';
+              console.log(`[AUTO] ${pos.symbol}: Jupiter NO_ROUTES, using GMGN price ($${gmgnPriceUSD})`);
+              if (pos.quoteFailCount > 0) {
+                if (pos.isDryRun) dryRun.updateDryPosition(pos.tokenMint, { quoteFailCount: 0 });
+                else { const { updatePosition } = require('./positions'); updatePosition(pos.tokenMint, { quoteFailCount: 0 }); }
+              }
+            } else {
+              throw new Error('GMGN price unavailable');
+            }
+          } catch (gmgnErr) {
+            // Both Jupiter and GMGN failed — count as NO_ROUTES
+            const failCount = (pos.quoteFailCount || 0) + 1;
+            if (failCount >= 3) {
+                if (pos.isDryRun) {
+                  dryRun.closeDryPosition(pos.tokenMint, 0, 'dead_token');
+                } else {
+                  const { closePosition } = require('./positions');
+                  closePosition(pos.tokenMint, 0, 'none', 'dead_token');
+                }
+                console.log(`[AUTO] 💀 ${pos.symbol}: dead token (NO_ROUTES x3), auto-closed`);
+                const totalReceived = pos.totalSolReceived || 0;
+                const actualLoss = (pos.solSpent || 0) - totalReceived;
+                const lossPct = pos.solSpent > 0 ? ((actualLoss / pos.solSpent) * 100) : 100;
+                const rugPrefix = pos.isDryRun ? '🟡 <b>DRY RUN —' : '💀 <b>';
+                const rugMsg = [
+                  `${rugPrefix} RUG DETECTED</b>`,
+                  ``,
+                  `Token: <b>${pos.symbol || 'Unknown'}</b>`,
+                  `CA: <code>${pos.tokenMint}</code>`,
+                  `Entry: ${pos.solSpent?.toFixed(4) || '?'} SOL`,
+                  totalReceived > 0 ? `Recovered: ${totalReceived.toFixed(4)} SOL (partial sells)` : null,
+                  `Loss: <b>-${actualLoss.toFixed(4)} SOL (-${lossPct.toFixed(1)}%)</b>`,
+                  `Reason: NO_ROUTES_FOUND x3 — token dead`,
+                ].filter(Boolean).join('\n');
+                sendTelegram(rugMsg, { parse_mode: 'HTML' }).catch(() => {});
+                continue;
+            }
+            if (pos.isDryRun) dryRun.updateDryPosition(pos.tokenMint, { quoteFailCount: failCount });
+            else { const { updatePosition } = require('./positions'); updatePosition(pos.tokenMint, { quoteFailCount: failCount }); }
+            console.log(`[AUTO] ${pos.symbol}: NO_ROUTES (${failCount}/3)`);
             continue;
           }
-          const failCount = (pos.quoteFailCount || 0) + 1;
-          if (failCount >= 3) {
-              if (pos.isDryRun) {
-                dryRun.closeDryPosition(pos.tokenMint, 0, 'dead_token');
-              } else {
-                const { closePosition } = require('./positions');
-                closePosition(pos.tokenMint, 0, 'none', 'dead_token');
-              }
-              console.log(`[AUTO] 💀 ${pos.symbol}: dead token (NO_ROUTES x3), auto-closed`);
-              const totalReceived = pos.totalSolReceived || 0;
-              const actualLoss = (pos.solSpent || 0) - totalReceived;
-              const lossPct = pos.solSpent > 0 ? ((actualLoss / pos.solSpent) * 100) : 100;
-              const rugPrefix = pos.isDryRun ? '🟡 <b>DRY RUN —' : '💀 <b>';
-              const rugMsg = [
-                `${rugPrefix} RUG DETECTED</b>`,
-                ``,
-                `Token: <b>${pos.symbol || 'Unknown'}</b>`,
-                `CA: <code>${pos.tokenMint}</code>`,
-                `Entry: ${pos.solSpent?.toFixed(4) || '?'} SOL`,
-                totalReceived > 0 ? `Recovered: ${totalReceived.toFixed(4)} SOL (partial sells)` : null,
-                `Loss: <b>-${actualLoss.toFixed(4)} SOL (-${lossPct.toFixed(1)}%)</b>`,
-                `Reason: NO_ROUTES_FOUND x3 — token dead`,
-              ].filter(Boolean).join('\n');
-              sendTelegram(rugMsg, { parse_mode: 'HTML' }).catch(() => {});
-              continue;
-          }
-          if (pos.isDryRun) dryRun.updateDryPosition(pos.tokenMint, { quoteFailCount: failCount });
-          else { const { updatePosition } = require('./positions'); updatePosition(pos.tokenMint, { quoteFailCount: failCount }); }
-          console.log(`[AUTO] ${pos.symbol}: NO_ROUTES (${failCount}/3)`);
+        } else if (msg.includes('429') || msg.includes('Too many requests')) {
+          continue;
+        } else {
+          console.log(`[AUTO] ${pos.symbol}: Jupiter quote failed, skipping`);
           continue;
         }
-        if (msg.includes('429') || msg.includes('Too many requests')) {
-          continue;
-        }
-        console.log(`[AUTO] ${pos.symbol}: Jupiter quote failed, skipping`);
-        continue;
       }
       if (!currentPrice) continue;
 
