@@ -452,6 +452,10 @@ async function handlePnl(chatId) {
   const lines = [
     `📊 <b>PNL Summary</b>`,
     ``,
+    `📈 Open: ${live.openCount + dry.openCount} positions`,
+    `💰 Open PNL: ${fmt(combinedOpenPnl)} SOL`,
+    `  🔴 Live: ${fmt(live.openPnl)} SOL | 🟡 Dry: ${fmt(dry.openPnl)} SOL`,
+    ``,
     `🕐 All-Time: ${liveClosed.length + dryClosed.length} trades`,
     `💰 Total: ${fmt(combinedTotalPnl)} SOL`,
     `  🔴 Live: ${fmt(live.totalPnl)} SOL | 🟡 Dry: ${fmt(dry.totalPnl)} SOL`,
@@ -459,10 +463,6 @@ async function handlePnl(chatId) {
     `📅 Today: ${live.todayClosed.length + dry.todayClosed.length} trades`,
     `💰 Today: ${fmt(combinedTodayPnl)} SOL`,
     `  🔴 Live: ${fmt(live.todayPnl)} SOL | 🟡 Dry: ${fmt(dry.todayPnl)} SOL`,
-    ``,
-    `📈 Open: ${live.openCount + dry.openCount} positions`,
-    `💰 Open PNL: ${fmt(combinedOpenPnl)} SOL`,
-    `  🔴 Live: ${fmt(live.openPnl)} SOL | 🟡 Dry: ${fmt(dry.openPnl)} SOL`,
     ``,
     `📋 Recent (last 10):`,
   ];
