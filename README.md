@@ -1,21 +1,30 @@
 # GMGN Screener + Auto Trader
 
-Solana token screener with automated trading, rug detection, and wallet management via Telegram bot.
+Solana token screener with automated trading, rug detection, bundler detection, and wallet management via Telegram bot.
 
 ---
 
 ## Features Overview
 
-### 1. Token Screener
+### 1. Dual-Source Token Screener
 
-**GMGN Phase 2 Scanner** — automatically scans trending Solana tokens at configurable intervals (default: every 3 minutes).
+Automatically scans Solana tokens from **two independent sources** at configurable intervals.
+
+**Sources:**
+| Source | Description | Adaptive Filters |
+|--------|-------------|------------------|
+| **Trending** | GMGN trending tokens | Full filters (MC, momentum, volume) |
+| **Trenches** | GMGN trenches/new pairs | Skips MC filter, skips momentum, volume min = 0 |
+
+Each source has its own **seen list** (`gmgn-seen-trending.json`, `gmgn-seen-trenches.json`) — same token can be detected by both sources independently.
 
 **How it works:**
-- Fetches trending tokens from GMGN API
-- Applies multi-layer filtering (Default or Custom mode)
-- Scores tokens 0-100 based on 9 weighted criteria
-- Auto-buys tokens passing the score threshold
-- Dedup tracking prevents re-alerting the same token
+1. Fetches tokens from selected source (GMGN API)
+2. Applies multi-layer filtering (Default or Custom mode)
+3. For trenches: enriches price data via `gmgn-cli token info` (real price + 5m/1h change)
+4. Scores tokens 0-100 based on 9 weighted criteria
+5. Auto-buys tokens passing the score threshold
+6. Dedup tracking prevents re-alerting the same token per source
 
 **Scoring System (0-100):**
 | Criteria | Weight | Description |
@@ -45,16 +54,18 @@ maxTop10HolderRate: 95%
 
 *Custom Mode (editable via Telegram):*
 ```
-minAge      — Minimum token age (minutes)
+minAge      — Minimum token age (0 = no filter)
 maxAge      — Maximum token age (minutes)
-minMC       — Minimum market cap ($)
-maxMC       — Maximum market cap ($)
-minVol      — Minimum 24h volume ($)
+minMC       — Minimum market cap ($0 = no filter)
+maxMC       — Maximum market cap ($0 = no filter)
+minVol      — Minimum 24h volume ($0 = no filter)
 minBuyRatio — Minimum buy/sell ratio
 maxBundler  — Max bundler % (supply concentration)
 maxTop10    — Max top 10 holder % (supply concentration)
-minHolder   — Minimum holder count
+minHolder   — Minimum holder count (0 = no filter)
 ```
+
+All filter values can be set to **0** (disabled/no filter).
 
 **Debug Logging:**
 When enabled, shows detailed filter breakdown per scan:
@@ -78,7 +89,7 @@ When enabled, shows detailed filter breakdown per scan:
 - Automatically buys tokens passing score threshold
 - Configurable buy amount (SOL)
 - Configurable slippage (bps)
-- Jupiter V1 API for best-route swap
+- Jupiter V6 API for best-route swap
 
 **Auto Sell (Multi-Strategy Exit):**
 
@@ -95,15 +106,31 @@ Remaining: exits via Trailing TP or Hard SL
 - Sells when price drops from peak by configurable % (default: 5%)
 - Example: Token pumps to +40%, trailing activates, drops to +35% → sells
 
-*Hard Stop Loss:*
-- Sells entire position when PNL drops below threshold (default: -25%)
-- Always active, overrides partial sells
+*2-Layer Stop Loss:*
+```
+Soft SL: -15% → wait 15s for recovery
+  ├─ Price recovers above -15% → reset, continue holding
+  └─ Price stays below -15% after 15s → sell
+
+Hard SL: -25% → instant sell (no waiting)
+```
 
 **Position Monitor:**
-- Checks all open positions every 10s (configurable 5-60s)
+- Checks all open positions every 10s (configurable 10-3600s)
 - 2s delay between position checks (anti rate-limit)
 - Uses Jupiter quotes for accurate PNL calculation
 - Tracks peak price and peak PNL for trailing
+- **Live prices + live liquidity** in positions menu
+
+**Dead Token Auto-Close:**
+- Tracks `quoteFailCount` per position
+- Increments on each `NO_ROUTES_FOUND`
+- Resets to 0 on successful quote
+- Auto-closes position after **3 consecutive failures**
+
+**Wallet Empty Auto-Close:**
+- Monitors wallet balance during position check
+- If balance = 0 → auto-close all positions + notification
 
 **Position Display (via Telegram):**
 ```
@@ -120,7 +147,50 @@ CA: 0x1234...5678
 
 ---
 
-### 3. Rug Detection
+### 3. Position Rug Detector
+
+**Per-position monitoring** — checks each open position every **30 seconds** for rug signals.
+
+**6 Rug Signals (scored 0-100):**
+| Signal | Score | Detection |
+|--------|-------|-----------|
+| Price crash | 30 | > -50% from entry |
+| Liquidity drain | 25 | > -60% liquidity drop |
+| Top holder dump | 20 | Top holder sold > 50% |
+| Volume spike + dump | 15 | 10x volume + price drop |
+| Honeypot sell fail | 5 | Sell transaction reverts |
+| LP removal | 5 | Liquidity removed from pool |
+
+**Auto-Sell Threshold:** Score ≥ 30 → automatic sell + rug notification
+
+**Pre-Bond Skip:** Skips liquidity drain signal for tokens with < $10K liquidity (pre-bond phase has naturally volatile liquidity).
+
+---
+
+### 4. Bundler Detector
+
+Detects **bundled token launches** where one entity controls multiple wallets to buy in the same block.
+
+**3 Detection Rules:**
+| Rule | Threshold | Description |
+|------|-----------|-------------|
+| Rule 1 | ≥20 transfers from ≤2 payers | Classic bundle pattern |
+| Rule 2 | ≥15 burst transfers in single block | Same-block bundle |
+| Rule 3 | ≥80% supply from ≤3 wallets | Extreme concentration |
+
+**Classification:**
+- **ACTIVE bundler** — detected in last 15 seconds (block-level activity)
+- **HISTORICAL bundler** — detected previously but not currently active
+
+**Auto-Blacklist:** After **5x** bundler detection → auto-blacklist the wallet address.
+
+**Cache:** 15-second cache per wallet to avoid redundant API calls.
+
+**Filter:** Tokens with `maxBundler%` above threshold are rejected. Default: < 25%.
+
+---
+
+### 5. Rug Detection (Legacy)
 
 **Three types of rug notifications:**
 
@@ -139,15 +209,9 @@ CA: 0x1234...5678
 - Shows as "RUG" instead of normal "Auto-Sell"
 - Includes peak PNL and TX link
 
-**Dead Token Auto-Close:**
-- Tracks `quoteFailCount` per position
-- Increments on each NO_ROUTES_FOUND
-- Resets to 0 on successful quote
-- Auto-closes position after 3 consecutive failures
-
 ---
 
-### 4. Wallet Management
+### 6. Wallet Management
 
 **Multi-Wallet Support:**
 - Import existing wallet (base58 private key)
@@ -194,14 +258,11 @@ CA: 0x1234...5678
 
 ---
 
-### 5. PNL Tracking
+### 7. PNL Tracking
 
-**PNL Summary (via /pnl command):**
+**PNL Summary (via 📈 PNL button):**
 ```
 📊 PNL Summary
-
-📊 Open Positions: 3
-💰 Open PNL: +0.0125 SOL (+27.8%)
 
 📊 All-Time
 📈 Trades: 45
@@ -213,29 +274,38 @@ CA: 0x1234...5678
 💰 Today PNL: +0.0450 SOL
 🏆 Win Rate: 5W/3L (63%)
 
+📊 Open Positions: 3
+💰 Open PNL: +0.0125 SOL (+27.8%)
+
 📋 Recent:
 🟢 TOKEN: +0.0075 SOL (+50.0%) auto-sell
 🔴 RUG: -0.0150 SOL (-100%) dead_token
 🟢 BRETT: +0.0030 SOL (+20.0%) trailing
 ```
 
-**PNL Reset:**
-- Daily reset at 7:00 AM WIB (00:00 UTC)
+**PNL Layout Order:** All-Time → Today → Open Positions → Recent
+
+**PNL Format:**
+- Win rate: `12W/33L` format
+- PNL sign: always explicit `+` or `-` prefix
+- Daily reset at **7:00 AM WIB** (00:00 UTC)
 - All-time PNL never resets
 - Open PNL calculated via Jupiter quotes
 
 ---
 
-### 6. Telegram Bot Interface
+### 8. Telegram Bot Interface
 
 **Main Menu (via /start or /menu):**
 ```
-🤖 GMGN Screener + Trader
+🤖 GMGN Screener
 
 📊 Positions: 3/5
 🤖 Auto-Trade: ✅ ON
 💰 Buy: 0.015 SOL | 🛑 SL: -25%
 📉 Trail: 5% | 📊 Score: 40
+
+🔍 Screener: Trending (Custom)
 
 Select option:
 
@@ -263,10 +333,15 @@ Select option:
 - No need to type commands
 - Tap to navigate between menus
 - Real-time data refresh
+- Hyperlink format for all external links (GMGN, Birdeye, Solscan)
+
+**Notification Buttons:**
+- Auto-buy, auto-sell, and partial sell notifications include inline keyboard buttons
+- Quick access to token info, sell, and position management
 
 ---
 
-### 7. Config Management
+### 9. Config Management
 
 **Config Menu (via ⚙️ Config button):**
 ```
@@ -274,13 +349,14 @@ Select option:
 
 🤖 Auto-Trade: ✅ ON
 💰 Buy: 0.015 SOL
-🛑 SL: -25%
+🛑 Soft SL: -15% (wait 15s)
+🛑 Hard SL: -25%
 📉 Trail: 5%
 🎯 Trigger: +15%
 📊 Score: 40
 📦 Max: 5
 ⏱ Check: 10s
-🔍 Scan: 3m
+🔍 Scan: 1m 30s
 📈 Slippage: 5%
 
 🎯 Partial Sells:
@@ -289,23 +365,23 @@ Select option:
   3. Sell 25% at +50%
   → 0% trailing TP/SL
 
-🔍 Screener: Custom
-  Age: 30-60m
-  MC: $50K-$200K
-  Vol: $20K+
-  B/S: 1.5x+
-  Bundler: <20%
+🔍 Filter: Custom (Trending)
+  Age: 0-600m
+  MC: $300-$200K
+  Vol: $10K+
+  B/S: 1.3x+
+  Bundler: <30%
   Top10: <85%
-  Min Holders: 50
+  Min Holders: 60
 
 Tap button to edit value:
 
 [🤖 Auto: ON] [💰 Buy: 0.015]
-[🛑 SL: -25%] [📉 Trail: 5%]
-[🎯 Trigger: +15%] [📊 Score: 40]
-[📦 Max: 5] [⏱ Check: 10s]
-[🔍 Scan: 3m] [📈 Slip: 5%]
-[🎯 Partial Sells]
+[🛑 Soft SL] [🛑 Hard SL]
+[📉 Trail: 5%] [🎯 Trigger: +15%]
+[📊 Score: 40] [📦 Max: 5]
+[⏱ Check: 10s] [🔍 Scan: 1m 30s]
+[📈 Slip: 5%] [🎯 Partial Sells]
 [🔍 Filter: Custom]
 [🔙 Back]
 ```
@@ -316,13 +392,15 @@ Tap button to edit value:
 |-----------|---------|-------|-------------|
 | Auto-Trade | OFF | ON/OFF | Enable/disable auto trading |
 | Buy Amount | 0.05 SOL | 0.001-10 | SOL per buy |
-| Stop Loss | -50% | -5 to -95 | Hard SL threshold |
+| Soft SL | -15% | -5 to -50 | Soft stop loss (wait for recovery) |
+| Soft SL Wait | 15s | 5-120 | Seconds to wait before soft SL sells |
+| Hard SL | -25% | -5 to -95 | Hard stop loss (instant sell) |
 | Trail Drop | 15% | 1-50 | Drop from peak to trigger trailing |
 | Trigger | +20% | +5 to +100 | Peak PNL to activate trailing |
 | Score | 60 | 10-100 | Min screener score to auto-buy |
 | Max Positions | 5 | 1-20 | Max concurrent positions |
-| Check Interval | 15s | 5-60 | Position check frequency |
-| Scan Interval | 10m | 1-60 | Screener scan frequency |
+| Check Interval | 15s | 10-3600 | Position check frequency (seconds) |
+| Scan Interval | 60s | 10-3600 | Screener scan frequency (seconds) |
 | Slippage | 500 bps | 10-5000 | Swap slippage tolerance |
 
 **Partial Sells:**
@@ -333,13 +411,13 @@ Tap button to edit value:
 
 ---
 
-### 8. Jupiter Integration
+### 10. Jupiter Integration
 
-**Jupiter V1 API:**
+**Jupiter V6 API:**
 - Best-route swap across all Solana DEXes
 - API key support for premium routing
 - No maxAccounts limitation (Jupiter handles optimal routing)
-- Automatic retry on 429 rate limits (3x with backoff)
+- Automatic retry on 429 rate limits (3x with backoff: 2s, 4s)
 
 **Swap Flow:**
 ```
@@ -359,7 +437,7 @@ Tap button to edit value:
 
 ---
 
-### 9. Token-2022 Support
+### 11. Token-2022 Support
 
 **Full Support for Both Programs:**
 - SPL Token (TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA)
@@ -371,14 +449,9 @@ Tap button to edit value:
 - Account closing
 - Rent recovery
 
-**Why It Matters:**
-- Many new tokens use Token-2022
-- Older bots only support SPL Token
-- Missing Token-2022 = missing opportunities
-
 ---
 
-### 10. Rate Limit Safety
+### 12. Rate Limit Safety
 
 **Position Check Rate:**
 ```
@@ -386,7 +459,6 @@ Formula: maxPos × delay ≤ checkInterval
 
 5 positions × 2s = 10s (0.5 req/s) ✅
 10 positions × 2s = 20s (0.5 req/s) ✅
-15 positions × 2s = 30s (0.5 req/s) ✅
 20 positions × 2s = 40s (0.5 req/s) ✅
 ```
 
@@ -399,37 +471,58 @@ Formula: maxPos × delay ≤ checkInterval
 **API Limits:**
 - Jupiter: ~2 req/s (safe), 429 after burst
 - GMGN: ~1 req/s (safe), 429 after burst
-- Solana RPC: varies by provider (Helius: 100 req/s)
+- Helius RPC: 100 req/s (paid plan)
 
 ---
 
-### 11. Systemd Service
+### 13. Systemd Service
 
 **Installation:**
 ```bash
-sudo cp gngmscreener.service /etc/systemd/system/
+# Clone repository
+git clone https://github.com/kontia1/gmgn-screener.git
+cd gmgn-screener
+
+# Install dependencies
+npm install
+
+# Install gmgn-cli globally
+npm install -g gmgn-cli
+
+# Configure gmgn-cli
+gmgn-cli config set api_key YOUR_GMGN_API_KEY
+
+# Create .env from example
+cp .env.example .env
+# Edit .env with your credentials
+
+# Import wallet via Telegram bot
+# Send /wallet import <your_base58_private_key>
+
+# Install systemd service
+sudo cp gmgn-screener.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable gngmscreener
-sudo systemctl start gngmscreener
+sudo systemctl enable gmgn-screener
+sudo systemctl start gmgn-screener
 ```
 
 **Management:**
 ```bash
 # Check status
-sudo systemctl status gngmscreener
+sudo systemctl status gmgn-screener
 
 # View logs
-sudo journalctl -u gngmscreener -f
+sudo journalctl -u gmgn-screener -f
 
 # Restart
-sudo systemctl restart gngmscreener
+sudo systemctl restart gmgn-screener
 
 # Stop
-sudo systemctl stop gngmscreener
+sudo systemctl stop gmgn-screener
 ```
 
 **Auto-restart:**
-- Service auto-restarts on crash
+- Service auto-restarts on crash (RestartSec=10)
 - Logs to journalctl
 - Starts on boot (if enabled)
 
@@ -438,13 +531,14 @@ sudo systemctl stop gngmscreener
 ## Quick Start
 
 ```bash
-# 1. Clone / copy project
-cd gngmscreener
+# 1. Clone repository
+git clone https://github.com/kontia1/gmgn-screener.git
+cd gmgn-screener
 
 # 2. Install dependencies
 npm install
 
-# 3. Install gmgn-cli (if not installed)
+# 3. Install gmgn-cli globally
 npm install -g gmgn-cli
 
 # 4. Configure gmgn-cli with your API key
@@ -461,48 +555,64 @@ cp .env.example .env
 node index.js
 ```
 
+---
+
 ## Environment Variables
 
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `SOLANA_RPC_URL` | Yes | Solana RPC endpoint (Helius recommended) |
+| `HELIUS_API_KEY` | Yes | Helius API key (for bundler detection) |
 | `JUPITER_API_URL` | No | Jupiter API URL (default: `https://api.jup.ag/swap/v1`) |
 | `JUPITER_API_KEY` | No | Jupiter API key for premium routing |
 | `BOT_TOKEN` | Yes | Telegram bot token from @BotFather |
+| `BOT_USERNAME` | No | Telegram bot username (for inline links) |
 | `CHAT_ID` | Yes | Your Telegram chat ID |
 | `GMGN_API_KEY` | Yes | GMGN API key (`x-apikey` header) |
 | `WALLET_PRIVATE_KEY` | No | Base58 private key (alternative to `/wallet import`) |
 | `ALLOWED_CHAT_IDS` | No | Comma-separated chat IDs (empty = allow all) |
 
+---
+
 ## File Structure
 
 ```
+gmgn-screener/
 ├── index.js              Entry point
 ├── bot.js                Telegram polling + command router
-├── screener.js           GMGN Phase 2 scanner
+├── screener.js           GMGN scanner (trending + trenches)
 ├── src/
-│   ├── autotrade.js      Auto buy/sell + rug detection
+│   ├── autotrade.js      Auto buy/sell + 2-layer SL + rug detection
 │   ├── trading.js        Jupiter swap execution
 │   ├── positions.js      Position store + PNL tracking
 │   ├── wallet.js         Wallet management + account cleanup
 │   ├── buttons.js        Telegram inline keyboard handlers
 │   ├── config.js         Config management
-│   └── utils.js          Helpers
+│   ├── bundler-detector.js  Bundler detection (Helius API)
+│   └── utils.js          Helpers (fmtMc, fmtVol, etc.)
 ├── commands/
 │   └── trade.js          Telegram commands
 ├── lib/
 │   └── shared.js         GMGN CLI + Telegram API
+├── scripts/
+│   └── telegram_config.json  Bot token config
 ├── config/
-│   └── wallet.json       Wallet keypair (auto-created)
+│   └── wallet.json       Wallet keypair (auto-created, gitignored)
 ├── data/
 │   ├── auto-config.json  Trading config (custom filters)
 │   ├── positions.json    Open positions
 │   └── closed.json       Closed positions
 ├── output/
-│   └── gmgn-seen.json    Screener dedup tracker
-└── .env                  Credentials (never commit)
+│   ├── gmgn-seen-trending.json   Seen tokens (trending source)
+│   ├── gmgn-seen-trenches.json   Seen tokens (trenches source)
+│   └── bundler-data.json         Bundler detection cache
+├── .env                  Environment variables (gitignored)
+├── .env.example          Environment template
+└── .gitignore
 ```
+
+---
 
 ## License
 
-Private — do not distribute.
+Private — Not for distribution.
