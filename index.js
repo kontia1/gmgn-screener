@@ -64,7 +64,7 @@ async function main() {
         return { ...DEFAULT_FILTERS, ...cfgFile.customFilters, _isCustom: true };
       }
     } catch {}
-    return { minAgeMin: 15, maxAgeMin: 120, minMC: 20000, maxMC: 500000, minVolume: 10000, maxBundlerRate: 0.3, maxTop10HolderRate: 0.95, minBuyRatio: 1.2, minHolder: 0, minLiquidity: 8000, minSmartDegen: 1, maxEntrapment: 0.08, minSniper: 3, maxSniper: 50, _isCustom: false };
+    return { ...DEFAULT_FILTERS, _isCustom: false };
   }
 
   function formatSignalAlert(t, baseScore, signalResult) {

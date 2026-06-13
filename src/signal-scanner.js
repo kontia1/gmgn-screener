@@ -412,7 +412,7 @@ async function runSignalScan(processToken) {
     console.log(`[SIGNAL] Scanning...`);
 
     // Fetch signals
-    const signals = fetchSignals();
+    const signals = await fetchSignals();
     if (!signals.length) {
       console.log(`[SIGNAL] No signals found`);
       return;
