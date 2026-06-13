@@ -15,7 +15,7 @@ const DEFAULT_SIGNAL_CONFIG = {
   enabled: true,
   intervalSec: 30,
   mcMin: 10000,
-  mcMax: 500000,
+  mcMax: 100000,
   signalRatio: 0.30,
   minContribution: 10,
   maxContribution: 25,
@@ -36,7 +36,7 @@ const DEFAULT_SIGNAL_CONFIG = {
     9: -5,    // KOL Sell
     10: 8,    // New Wallet Influx
     11: 8,    // Holder Surge
-    12: 5,    // Liquidity Add
+    12: 8,     // Liquidity Add
     13: -5,   // Liquidity Remove
     // 14: not supported by GMGN API
     // 15: not supported by GMGN API
@@ -47,7 +47,7 @@ const DEFAULT_SIGNAL_CONFIG = {
 
 // ─── Dedup Config ──────────────────────────────────────
 const DEFAULT_DEDUP_CONFIG = {
-  globalTtlSec: 300,  // 5 minutes
+  globalTtlSec: 180,  // 3 minutes
 };
 
 // ─── Load Signal Config ────────────────────────────────

@@ -1306,7 +1306,7 @@ async function sendSignalMenu(chatId) {
 
 const DEFAULT_SIGNAL_WEIGHTS = {
   1: 8, 2: -3, 3: 8, 4: 10, 5: -5, 6: 12, 7: -5, 8: 10,
-  9: -5, 10: 8, 11: 8, 12: 5, 13: -5, 17: -3, 18: 0,
+  9: -5, 10: 8, 11: 8, 12: 8, 13: -5, 17: -3, 18: 0,
 };
 
 async function cfgSignalToggle(chatId, msgId, queryId) {
