@@ -521,7 +521,8 @@ async function sendPositionsMenu(chatId) {
     if (!quoteFailed && pnlPct > (pos.peakPnlPct || 0)) {
       pos.peakPnlPct = pnlPct;
       pos.peakPrice = pos.remainingTokens > 0 ? (quoteSolOut / pos.remainingTokens) : pos.peakPrice;
-      positions.updatePosition(pos.tokenMint, { peakPnlPct: pnlPct, peakPrice: pos.peakPrice });
+      if (isDryMode) dryRun.updateDryPosition(pos.tokenMint, { peakPnlPct: pnlPct, peakPrice: pos.peakPrice });
+      else positions.updatePosition(pos.tokenMint, { peakPnlPct: pnlPct, peakPrice: pos.peakPrice });
     }
 
     const { gmgnTokenInfo, gmgnTokenPool } = require('../lib/shared');
@@ -1484,9 +1485,45 @@ async function cfgSignalWeightSet(chatId, typeId, value) {
 
 async function handleSellButton(chatId, mintPrefix, pct) {
   clearPendingInput(chatId);
-  const open = positions.getOpenPositions();
+  const { getAutoConfig } = require('../src/autotrade');
+  const cfg = getAutoConfig();
+  const isDryMode = cfg.mode === 'dry_run';
+  const open = isDryMode ? dryRun.getOpenDryPositions() : positions.getOpenPositions();
   const pos = open.find(p => p.tokenMint.startsWith(mintPrefix));
   if (!pos) return tgApi('sendMessage', { chat_id: chatId, text: '❌ Position not found', parse_mode: 'HTML' });
+
+  // DRY RUN — virtual sell
+  if (isDryMode) {
+    const tokensToSell = pos.remainingTokens * (pct / 100);
+    let virtualSol = 0;
+    try {
+      const rawAmount = Math.floor(tokensToSell * Math.pow(10, pos.decimals || 6));
+      const { getQuote, SOL_MINT } = require('../src/trading');
+      const quote = await getQuote(pos.tokenMint, SOL_MINT, rawAmount, 500);
+      virtualSol = parseFloat(quote.outAmount) / 1e9;
+    } catch {
+      virtualSol = tokensToSell * (pos.entryPrice || 0);
+    }
+
+    if (pct >= 100) {
+      const closed = dryRun.closeDryPosition(pos.tokenMint, virtualSol, 'button');
+      const emoji = closed.pnl >= 0 ? '🟢' : '🔴';
+      await tgApi('sendMessage', {
+        chat_id: chatId,
+        text: `${emoji} <b>DRY RUN — Sell All ${pos.symbol}</b>\n\n💰 Would get: ~${virtualSol.toFixed(4)} SOL\n📊 PNL: ${closed.pnl >= 0 ? '+' : ''}${closed.pnl.toFixed(4)} SOL (${closed.pnlPct}%)`,
+        parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: [[{ text: '📊 Positions', callback_data: 'menu_positions' }, { text: '🔙 Main', callback_data: 'menu_main' }]] },
+      });
+    } else {
+      dryRun.recordDryPartialSell(pos.tokenMint, tokensToSell, virtualSol, `button_${pct}pct`);
+      await tgApi('sendMessage', {
+        chat_id: chatId,
+        text: `🟡 <b>DRY RUN — Sell ${pct}% ${pos.symbol}</b>\n\n📦 Would sell: ${tokensToSell.toFixed(2)} tokens\n💰 Would get: ~${virtualSol.toFixed(4)} SOL`,
+        parse_mode: 'HTML',
+      });
+    }
+    return;
+  }
 
   try {
     await tgApi('sendMessage', { chat_id: chatId, text: `⏳ Selling ${pct}% of ${pos.symbol}...`, parse_mode: 'HTML' });
@@ -1533,6 +1570,47 @@ async function handleBuyButton(chatId, mintPrefix, amount) {
 
   const fullMint = Object.keys(seen).find(k => k.startsWith(mintPrefix));
   if (!fullMint) return tgApi('sendMessage', { chat_id: chatId, text: '❌ Token not found', parse_mode: 'HTML' });
+  const symbol = seen[fullMint]?.symbol || fullMint.slice(0, 6);
+
+  // DRY RUN — virtual buy via Jupiter quote (same as auto-trade)
+  const { getAutoConfig } = require('../src/autotrade');
+  const cfg = getAutoConfig();
+  if (cfg.mode === 'dry_run') {
+    try {
+      await tgApi('sendMessage', { chat_id: chatId, text: `🟡 DRY RUN — Buying ${amount} SOL of ${symbol}...`, parse_mode: 'HTML' });
+
+      const { getQuote, SOL_MINT } = require('../src/trading');
+      const lamports = Math.floor(amount * 1e9);
+      const quote = await getQuote(SOL_MINT, fullMint, lamports, 500);
+      const decimals = 6;
+      const rawOutput = parseFloat(quote.outAmount || '0');
+      const virtualTokenAmount = rawOutput / Math.pow(10, decimals);
+      const entryPrice = virtualTokenAmount > 0 ? amount / virtualTokenAmount : 0;
+
+      if (virtualTokenAmount <= 0) {
+        await tgApi('sendMessage', { chat_id: chatId, text: '⚠️ Jupiter returned 0 tokens', parse_mode: 'HTML' });
+        return;
+      }
+
+      const pos = dryRun.openDryPosition(fullMint, symbol, entryPrice, amount, virtualTokenAmount, decimals, {
+        slPct: cfg.hardSlPct || cfg.slPct,
+        trailingDropPct: cfg.trailingDropPct,
+        trailingTriggerPct: cfg.trailingTriggerPct,
+        trailingEnabled: true,
+        mc: seen[fullMint]?.mc || 0,
+      });
+
+      await tgApi('sendMessage', {
+        chat_id: chatId,
+        text: `🟡 <b>DRY RUN — Buy Success</b>\n\n💰 Spent: ${amount} SOL\n📦 Got: ${virtualTokenAmount.toFixed(2)} tokens\n📊 Entry: ${entryPrice.toFixed(10)} SOL/token`,
+        parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: [[{ text: '📊 Positions', callback_data: 'menu_positions' }, { text: '🔙 Main', callback_data: 'menu_main' }]] },
+      });
+    } catch (e) {
+      await tgApi('sendMessage', { chat_id: chatId, text: `❌ DRY RUN Buy failed: ${e.message}`, parse_mode: 'HTML' });
+    }
+    return;
+  }
 
   try {
     await tgApi('sendMessage', { chat_id: chatId, text: `⏳ Buying ${amount} SOL of ${seen[fullMint]?.symbol || fullMint.slice(0, 8)}...`, parse_mode: 'HTML' });
@@ -1564,7 +1642,8 @@ async function handleRefreshButton(chatId, mintPrefix) {
   clearPendingInput(chatId);
   const { getAutoConfig } = require('../src/autotrade');
   const cfg = getAutoConfig();
-  const open = positions.getOpenPositions();
+  const isDryMode = cfg.mode === 'dry_run';
+  const open = isDryMode ? dryRun.getOpenDryPositions() : positions.getOpenPositions();
   const pos = open.find(p => p.tokenMint.startsWith(mintPrefix));
   if (!pos) return tgApi('sendMessage', { chat_id: chatId, text: '❌ Position not found', parse_mode: 'HTML' });
 
