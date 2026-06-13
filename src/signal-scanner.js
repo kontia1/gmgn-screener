@@ -38,9 +38,9 @@ const DEFAULT_SIGNAL_CONFIG = {
     11: 8,    // Holder Surge
     12: 5,    // Liquidity Add
     13: -5,   // Liquidity Remove
-    14: 5,    // Sniper Activity
-    15: 15,   // Multi-Signal
-    16: 5,    // Social Spike
+    // 14: not supported by GMGN API
+    // 15: not supported by GMGN API
+    // 16: not supported by GMGN API
     17: -3,   // Dev Activity
   },
 };
@@ -351,22 +351,6 @@ function applySignalAdjustment(token, baseScore, activeSignals, config) {
     } else {
       penalty += Math.abs(adjustedWeight);
     }
-  }
-
-  // ── Type 15 special rule: Multi-Signal doesn't compound ──
-  if (activeSignals.includes(15)) {
-    const positiveWeights = activeSignals
-      .filter(t => (weights[t] || 0) > 0 && t !== 15)
-      .map(t => {
-        let w = weights[t];
-        if (antiDcEnabled && antiDoubleCount[`type${t}`]) {
-          w -= antiDoubleCount[`type${t}`];
-        }
-        return w;
-      });
-    const maxPositive = Math.max(weights[15] || 15, ...positiveWeights, 0);
-    // Replace signalScore with max positive only (penalty stays separate)
-    signalScore = maxPositive;
   }
 
   // ── Layer 2: Dynamic Cap ─────────────────────────────
