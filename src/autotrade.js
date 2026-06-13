@@ -383,8 +383,8 @@ async function executeFullExit(pos, reason, pnlResult) {
 
   // DRY RUN — virtual full exit
   if (pos.isDryRun) {
-    const closed = dryRun.closeDryPosition(pos.tokenMint, 0, reason);
-    const virtualSol = pos.solSpent + closed.pnl;
+    const virtualSol = pos.solSpent + (pnlResult?.pnl || 0);
+    const closed = dryRun.closeDryPosition(pos.tokenMint, virtualSol, reason);
 
     const isRug = closed.pnlPct <= -80;
     const emoji = closed.pnl >= 0 ? '🟢' : (isRug ? '💀' : '🔴');
@@ -671,7 +671,8 @@ async function checkPositions() {
             sendTelegram(bundlerMsg, { parse_mode: 'HTML' }).catch(() => {});
             
             if (pos.isDryRun) {
-              const closed = dryRun.closeDryPosition(pos.tokenMint, 0, 'bundler_detected');
+              const virtualSol = quoteSolOut + (pos.totalSolReceived || 0);
+              const closed = dryRun.closeDryPosition(pos.tokenMint, virtualSol, 'bundler_detected');
               await sendTelegram(
                 `🟡 <b>DRY RUN — Auto-Sell (Bundler): ${pos.symbol}</b>\n\n` +
                 `📊 PNL: ${closed.pnl >= 0 ? '+' : ''}${closed.pnl.toFixed(4)} SOL (${closed.pnlPct}%)\n` +
@@ -732,7 +733,8 @@ async function checkPositions() {
             sendTelegram(rugAlertMsg, { parse_mode: 'HTML' }).catch(() => {});
 
             if (pos.isDryRun) {
-              const closed = dryRun.closeDryPosition(pos.tokenMint, 0, 'rug_signal');
+              const virtualSol = quoteSolOut + (pos.totalSolReceived || 0);
+              const closed = dryRun.closeDryPosition(pos.tokenMint, virtualSol, 'rug_signal');
               await sendTelegram(
                 `🟡 <b>DRY RUN — Auto-Sell (Rug Signal): ${pos.symbol}</b>\n\n` +
                 `📊 PNL: ${closed.pnl >= 0 ? '+' : ''}${closed.pnl.toFixed(4)} SOL (${closed.pnlPct}%)\n` +
