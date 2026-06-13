@@ -385,13 +385,26 @@ async function executeFullExit(pos, reason, quoteSolOut = 0) {
   if (pos.isDryRun) {
     const closed = dryRun.closeDryPosition(pos.tokenMint, quoteSolOut, reason);
 
+    // Exit PNL: only from remaining amount sold (not cumulative with partials)
+    const remainingCostBasis = pos.solSpent - (pos.totalSolReceived || 0);
+    const exitPnl = quoteSolOut - remainingCostBasis;
+    const exitPnlPct = remainingCostBasis > 0 ? (exitPnl / remainingCostBasis * 100) : 0;
+
     const isRug = closed.pnlPct <= -80;
-    const emoji = closed.pnl >= 0 ? '🟢' : (isRug ? '💀' : '🔴');
+    const emoji = exitPnl >= 0 ? '🟢' : (isRug ? '💀' : '🔴');
     const header = isRug ? `🟡 <b>DRY RUN — RUG — ${pos.symbol}</b>` : `${emoji} <b>DRY RUN — Auto-Sell (${reason}): ${pos.symbol}</b>`;
+
+    // Show partial sell info if any
+    const partialInfo = (pos.totalSolReceived || 0) > 0
+      ? `📦 Partial sold: ${(pos.totalSolReceived || 0).toFixed(4)} SOL\n`
+      : '';
+
     await sendTelegram(
       `${header}\n\n` +
       `💰 Would get: ~${quoteSolOut.toFixed(4)} SOL\n` +
-      `📊 PNL: ${closed.pnl >= 0 ? '+' : ''}${closed.pnl.toFixed(4)} SOL (${closed.pnlPct}%)\n` +
+      partialInfo +
+      `📊 Exit PNL: ${exitPnl >= 0 ? '+' : ''}${exitPnl.toFixed(4)} SOL (${exitPnlPct >= 0 ? '+' : ''}${exitPnlPct.toFixed(1)}%)\n` +
+      `📊 Total PNL: ${closed.pnl >= 0 ? '+' : ''}${closed.pnl.toFixed(4)} SOL (${closed.pnlPct >= 0 ? '+' : ''}${closed.pnlPct}%)\n` +
       `📝 Reason: ${reason}\n` +
       `📈 Peak was: +${pos.peakPnlPct ?? '?'}%`,
       { reply_markup: { inline_keyboard: [
