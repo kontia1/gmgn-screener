@@ -401,4 +401,4 @@ const SIGNAL_NAMES = {
   18: 'Rug Warning',
 };
 
-module.exports = { runScan, loadSeen, getSeenFile, scoreToken, SIGNAL_NAMES };
+module.exports = { runScan, loadSeen, getSeenFile, scoreToken, SIGNAL_NAMES, DEFAULT_FILTERS };

@@ -142,11 +142,21 @@ async function autoBuy(tokenData) {
 
   // DRY RUN MODE — virtual buy, no on-chain transaction
   if (cfg.mode === 'dry_run') {
+    // Fetch actual decimals from on-chain (cached, fallback to 6)
+    let decimals = 6;
+    try {
+      const { Connection, PublicKey } = require('@solana/web3.js');
+      const { getMint } = require('@solana/spl-token');
+      const conn = new Connection(process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com');
+      const mintInfo = await getMint(conn, new PublicKey(mint));
+      decimals = mintInfo.decimals;
+    } catch { /* fallback to 6 */ }
+
     const price = tokenData.price || 0;
-    const virtualTokenAmount = price > 0 ? (cfg.buyAmountSol / price) / Math.pow(10, 6) : 0;
+    const virtualTokenAmount = price > 0 ? (cfg.buyAmountSol / price) / Math.pow(10, decimals) : 0;
     const mc = tokenData.market_cap || tokenData.fdv || 0;
 
-    const pos = dryRun.openDryPosition(mint, symbol, price, cfg.buyAmountSol, virtualTokenAmount, 6, {
+    const pos = dryRun.openDryPosition(mint, symbol, price, cfg.buyAmountSol, virtualTokenAmount, decimals, {
       slPct: cfg.hardSlPct || cfg.slPct,
       trailingDropPct: cfg.trailingDropPct,
       trailingTriggerPct: cfg.trailingTriggerPct,
@@ -414,12 +424,14 @@ async function checkRugSignals(pos) {
   let rugScore = 0;
 
   try {
-    // Fetch current GMGN data via CLI
-    const { execSync } = require('child_process');
-    const raw = execSync(`gmgn-cli token info --chain sol --address ${pos.tokenMint}`, {
+    // Fetch current GMGN data via CLI (async, non-blocking)
+    const { exec } = require('child_process');
+    const util = require('util');
+    const execAsync = util.promisify(exec);
+    const { stdout } = await execAsync(`gmgn-cli token info --chain sol --address ${pos.tokenMint}`, {
       encoding: 'utf8', timeout: 10000,
     });
-    const data = JSON.parse(raw);
+    const data = JSON.parse(stdout);
     const t = data?.data || {};
     const dev = t.dev || {};
     const stat = t.stat || {};
@@ -785,8 +797,8 @@ async function checkPositions() {
       } else {
         // PNL recovered above soft SL — reset timer
         if (pos.softSlTriggeredAt) {
-          if (pos.isDryRun) dryRun.updateDryPosition(pos.tokenMint, { softSlTriggeredAt: null });
-          else updatePosition(pos.tokenMint, { softSlTriggeredAt: null });
+          if (pos.isDryRun) dryRun.updateDryPosition(pos.tokenMint, { softSlTriggeredAt: null, rugWarningSent: false });
+          else updatePosition(pos.tokenMint, { softSlTriggeredAt: null, rugWarningSent: false });
           console.log(`[AUTO] ${pos.symbol}: Soft SL recovered! (${pnlPct.toFixed(1)}% > -${softSlPct}%)`);
           sendTelegram(
             `✅ <b>Soft SL Recovered: ${pos.symbol}</b>\n\n` +

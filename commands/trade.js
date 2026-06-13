@@ -178,17 +178,34 @@ async function handleSell(chatId, args) {
       return;
     }
     const tokensToSell = pos.remainingTokens * (pct / 100);
-    const virtualSol = tokensToSell * (pos.entryPrice || 0);
+
+    // Get current market price via Jupiter quote
+    let virtualSol = 0;
+    try {
+      const rawAmount = Math.floor(tokensToSell * Math.pow(10, pos.decimals || 6));
+      const quote = await trading.getQuote(pos.tokenMint, trading.SOL_MINT, rawAmount, 500);
+      virtualSol = parseFloat(quote.outAmount) / 1e9;
+    } catch {
+      // Fallback: estimate from entry price
+      virtualSol = tokensToSell * (pos.entryPrice || 0);
+    }
+
     if (pct >= 100) {
-      dryRun.closeDryPosition(mint, 0, 'manual');
+      const closed = dryRun.closeDryPosition(mint, virtualSol, 'manual');
+      const emoji = closed.pnl >= 0 ? '🟢' : '🔴';
+      await tgApi('sendMessage', {
+        chat_id: chatId,
+        text: `${emoji} <b>DRY RUN — Sell All</b>\n\n💰 Would get: ~${virtualSol.toFixed(4)} SOL\n📊 PNL: ${closed.pnl >= 0 ? '+' : ''}${closed.pnl.toFixed(4)} SOL (${closed.pnlPct}%)`,
+        parse_mode: 'HTML',
+      });
     } else {
       dryRun.recordDryPartialSell(mint, tokensToSell, virtualSol, `manual_${pct}pct`);
+      await tgApi('sendMessage', {
+        chat_id: chatId,
+        text: `🟡 <b>DRY RUN — Sell ${pct}%</b>\n\n📦 Would sell: ${tokensToSell.toFixed(2)} tokens\n💰 Would get: ~${virtualSol.toFixed(4)} SOL`,
+        parse_mode: 'HTML',
+      });
     }
-    await tgApi('sendMessage', {
-      chat_id: chatId,
-      text: `🟡 <b>DRY RUN — Sell</b>\n\n📦 Would sell: ${tokensToSell.toFixed(2)} tokens (${pct}%)\n💰 Would get: ~${virtualSol.toFixed(4)} SOL`,
-      parse_mode: 'HTML',
-    });
     return;
   }
 
@@ -243,10 +260,22 @@ async function handleSellAll(chatId, args) {
       await tgApi('sendMessage', { chat_id: chatId, text: '⚠️ No dry run position found.', parse_mode: 'HTML' });
       return;
     }
-    const closed = dryRun.closeDryPosition(mint, 0, 'manual');
+
+    // Get current market price via Jupiter quote
+    let virtualSol = 0;
+    try {
+      const rawAmount = Math.floor(pos.remainingTokens * Math.pow(10, pos.decimals || 6));
+      const quote = await trading.getQuote(pos.tokenMint, trading.SOL_MINT, rawAmount, 500);
+      virtualSol = parseFloat(quote.outAmount) / 1e9;
+    } catch {
+      virtualSol = pos.remainingTokens * (pos.entryPrice || 0);
+    }
+
+    const closed = dryRun.closeDryPosition(mint, virtualSol, 'manual');
+    const emoji = closed.pnl >= 0 ? '🟢' : '🔴';
     await tgApi('sendMessage', {
       chat_id: chatId,
-      text: `🟡 <b>DRY RUN — Sell All</b>\n\n📊 PNL: ${closed.pnl >= 0 ? '+' : ''}${closed.pnl.toFixed(4)} SOL (${closed.pnlPct}%)`,
+      text: `${emoji} <b>DRY RUN — Sell All</b>\n\n💰 Would get: ~${virtualSol.toFixed(4)} SOL\n📊 PNL: ${closed.pnl >= 0 ? '+' : ''}${closed.pnl.toFixed(4)} SOL (${closed.pnlPct}%)`,
       parse_mode: 'HTML',
     });
     return;
@@ -287,22 +316,18 @@ async function handlePositions(chatId) {
   const gmgn = require('../lib/shared');
   const header = isDryMode ? `🟡 <b>Dry Run Positions</b>` : `📋 <b>Open Positions</b>`;
   const lines = [`${header} — ${open.length}\n`];
+
+  // Fetch all quotes ONCE, store per-position data
+  const posData = new Map();
   for (const pos of open) {
-    // Use Jupiter quote for accurate PNL (same as monitor)
-    let currentPrice = 0;
     let quoteSolOut = 0;
     try {
       const rawAmount = Math.floor(pos.remainingTokens * Math.pow(10, pos.decimals));
       const quote = await getQuote(pos.tokenMint, SOL_MINT, rawAmount, 500);
       quoteSolOut = parseFloat(quote.outAmount) / 1e9;
-      currentPrice = pos.remainingTokens > 0 ? quoteSolOut / pos.remainingTokens : 0;
     } catch {}
 
-    // Get liquidity from GMGN
-    let liqUsd = 0;
-    let liqSol = 0;
-    let holders = 0;
-    let devStatus = '';
+    let liqUsd = 0, liqSol = 0, holders = 0, devStatus = '';
     try {
       const info = await gmgn.gmgnTokenInfo(pos.tokenMint);
       liqUsd = parseFloat(info?.liquidity || '0');
@@ -311,28 +336,27 @@ async function handlePositions(chatId) {
       devStatus = info?.dev?.creator_token_status || '';
     } catch {}
 
-    const currentValueSol = quoteSolOut;
-    const totalValueSol = currentValueSol + (pos.totalSolReceived || 0);
+    const currentPrice = pos.remainingTokens > 0 ? quoteSolOut / pos.remainingTokens : 0;
+    const totalValueSol = quoteSolOut + (pos.totalSolReceived || 0);
     const pnlSol = totalValueSol - pos.solSpent;
     const pnlPct = pos.solSpent > 0 ? (pnlSol / pos.solSpent * 100) : 0;
-    const isProfit = pnlSol >= 0;
-    const emoji = isProfit ? '🟢' : '🔴';
+    const emoji = pnlSol >= 0 ? '🟢' : '🔴';
 
-    // Rug risk indicator
     let rugRisk = '';
     if (liqUsd < 1000) rugRisk = '🔴 RUG RISK';
     else if (liqUsd < 5000) rugRisk = '🟡 Low Liq';
     else rugRisk = '🟢 OK';
 
-    // Partial sell status
     const partials = (pos.partialSells || []);
     const soldPartials = partials.filter(s => s.sold).length;
     const totalPartials = partials.filter(s => s.enabled !== false).length;
 
+    posData.set(pos.tokenMint, { quoteSolOut, pnlSol, pnlPct, emoji });
+
     lines.push(
       `<b>${pos.symbol}</b>`,
       `<code>${pos.tokenMint}</code>`,
-      `💰 Entry: ${pos.solSpent} SOL → Now: ${currentValueSol.toFixed(4)} SOL`,
+      `💰 Entry: ${pos.solSpent} SOL → Now: ${quoteSolOut.toFixed(4)} SOL`,
       `${emoji} PNL: ${pnlSol >= 0 ? '+' : ''}${pnlSol.toFixed(4)} SOL (${pnlPct.toFixed(1)}%)`,
       ``,
       `💧 Liq: $${liqUsd.toFixed(0)} (${liqSol.toFixed(1)} SOL) ${rugRisk}`,
@@ -345,34 +369,17 @@ async function handlePositions(chatId) {
     );
   }
 
-  // Send with inline keyboard buttons for each position
+  // Send individual position messages (reusing cached quotes)
   for (const pos of open) {
-    const posLines = [];
-    // Find lines for this position in the main text
-    const mintShort = pos.tokenMint.slice(0, 8);
-    
-    // Get current quote for this position
-    const { getQuote, SOL_MINT } = require('../src/trading');
-    let quoteSolOut = 0;
-    try {
-      const rawAmount = Math.floor(pos.remainingTokens * Math.pow(10, pos.decimals));
-      const quote = await getQuote(pos.tokenMint, SOL_MINT, rawAmount, 500);
-      quoteSolOut = parseFloat(quote.outAmount) / 1e9;
-    } catch {}
-    
-    const totalValueSol = quoteSolOut + (pos.totalSolReceived || 0);
-    const pnlSol = totalValueSol - pos.solSpent;
-    const pnlPct = pos.solSpent > 0 ? (pnlSol / pos.solSpent * 100) : 0;
-    const emoji = pnlSol >= 0 ? '🟢' : '🔴';
-    
+    const d = posData.get(pos.tokenMint) || { quoteSolOut: 0, pnlSol: 0, pnlPct: 0, emoji: '🔴' };
     const msg = [
       `<b>${pos.symbol}</b>`,
       `<code>${pos.tokenMint}</code>`,
-      `💰 Entry: ${pos.solSpent} SOL → Now: ${quoteSolOut.toFixed(4)} SOL`,
-      `${emoji} PNL: ${pnlSol >= 0 ? '+' : ''}${pnlSol.toFixed(4)} SOL (${pnlPct.toFixed(1)}%)`,
+      `💰 Entry: ${pos.solSpent} SOL → Now: ${d.quoteSolOut.toFixed(4)} SOL`,
+      `${d.emoji} PNL: ${d.pnlSol >= 0 ? '+' : ''}${d.pnlSol.toFixed(4)} SOL (${d.pnlPct.toFixed(1)}%)`,
       `📦 Remaining: ${pos.remainingTokens.toFixed(2)} tokens`,
     ].join('\n');
-    
+
     await tgApi('sendMessage', {
       chat_id: chatId,
       text: msg,

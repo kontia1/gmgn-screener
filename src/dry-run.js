@@ -20,7 +20,9 @@ function loadDryPositions() {
 function saveDryPositions(positions) {
   const dir = path.dirname(DRY_POSITIONS_FILE);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(DRY_POSITIONS_FILE, JSON.stringify(positions, null, 2));
+  const tmpFile = DRY_POSITIONS_FILE + '.tmp';
+  fs.writeFileSync(tmpFile, JSON.stringify(positions, null, 2));
+  fs.renameSync(tmpFile, DRY_POSITIONS_FILE);
 }
 
 function loadDryClosed() {
@@ -31,7 +33,9 @@ function loadDryClosed() {
 function saveDryClosed(closed) {
   const dir = path.dirname(DRY_CLOSED_FILE);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(DRY_CLOSED_FILE, JSON.stringify(closed, null, 2));
+  const tmpFile = DRY_CLOSED_FILE + '.tmp';
+  fs.writeFileSync(tmpFile, JSON.stringify(closed, null, 2));
+  fs.renameSync(tmpFile, DRY_CLOSED_FILE);
 }
 
 // ─── Open Virtual Position ─────────────────────────────

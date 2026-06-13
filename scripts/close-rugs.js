@@ -83,7 +83,8 @@ async function main() {
       const rawAmount = Math.floor(pos.remainingTokens * Math.pow(10, pos.decimals));
       const quote = await getQuote(pos.tokenMint, SOL_MINT, rawAmount, 500);
       const solOut = parseFloat(quote.outAmount) / 1e9;
-      const pnlPct = pos.solSpent > 0 ? ((solOut - pos.solSpent) / pos.solSpent * 100) : -100;
+      const totalValueSol = solOut + (pos.totalSolReceived || 0);
+      const pnlPct = pos.solSpent > 0 ? ((totalValueSol - pos.solSpent) / pos.solSpent * 100) : -100;
 
       if (pnlPct <= -80) {
         if (DRY_RUN) {

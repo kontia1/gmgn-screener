@@ -11,7 +11,7 @@ const { runScan } = require('./screener');
 const { startBot } = require('./bot');
 const { startMonitor } = require('./src/autotrade');
 const { runSignalScan, getSignalConfig, applySignalAdjustment, cleanupGlobalDedup } = require('./src/signal-scanner');
-const { scoreToken, SIGNAL_NAMES } = require('./screener');
+const { scoreToken, SIGNAL_NAMES, DEFAULT_FILTERS } = require('./screener');
 const { autoBuy, getAutoConfig } = require('./src/autotrade');
 const { sendTelegram, fmtMc } = require('./lib/shared');
 const { alertButtons } = require('./src/buttons');
@@ -60,7 +60,6 @@ async function main() {
   function getActiveFilters() {
     try {
       const cfgFile = JSON.parse(fs.readFileSync(path.join(__dirname, 'data', 'auto-config.json'), 'utf8'));
-      const DEFAULT_FILTERS = { minAgeMin: 15, maxAgeMin: 120, minMC: 20000, maxMC: 500000, minVolume: 10000, maxBundlerRate: 0.3, maxTop10HolderRate: 0.95, minBuyRatio: 1.2, minHolder: 0, minLiquidity: 8000, minSmartDegen: 1, maxEntrapment: 0.08, minSniper: 3, maxSniper: 50 };
       if (cfgFile.filterMode === 'custom' && cfgFile.customFilters) {
         return { ...DEFAULT_FILTERS, ...cfgFile.customFilters, _isCustom: true };
       }

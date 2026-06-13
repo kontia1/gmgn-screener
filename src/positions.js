@@ -19,7 +19,9 @@ function loadPositions() {
 function savePositions(positions) {
   const dir = path.dirname(POSITIONS_FILE);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(POSITIONS_FILE, JSON.stringify(positions, null, 2));
+  const tmpFile = POSITIONS_FILE + '.tmp';
+  fs.writeFileSync(tmpFile, JSON.stringify(positions, null, 2));
+  fs.renameSync(tmpFile, POSITIONS_FILE);
 }
 
 function loadClosed() {
@@ -30,7 +32,9 @@ function loadClosed() {
 function saveClosed(closed) {
   const dir = path.dirname(CLOSED_FILE);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(CLOSED_FILE, JSON.stringify(closed, null, 2));
+  const tmpFile = CLOSED_FILE + '.tmp';
+  fs.writeFileSync(tmpFile, JSON.stringify(closed, null, 2));
+  fs.renameSync(tmpFile, CLOSED_FILE);
 }
 
 // ─── Open Position ─────────────────────────────────────
