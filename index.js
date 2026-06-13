@@ -15,8 +15,11 @@ const { scoreToken, SIGNAL_NAMES, DEFAULT_FILTERS } = require('./screener');
 const { autoBuy, getAutoConfig } = require('./src/autotrade');
 const { sendTelegram, fmtMc } = require('./lib/shared');
 const { alertButtons } = require('./src/buttons');
+const { runTrackerScan, getTrackerConfig } = require('./src/smartmoney-tracker');
 let scanning = false;
 let signalScanning = false;
+let smScanning = false;
+let kolScanning = false;
 
 async function main() {
   console.log(`[${new Date().toISOString()}] GMGN Screener + Trader started`);
@@ -146,6 +149,89 @@ async function main() {
 
   setTimeout(signalTick, 5000);
   setInterval(cleanupGlobalDedup, 5 * 60 * 1000);
+
+  // ─── SmartMoney + KOL Tracker Loops (independent) ──────
+  function trackerProcessToken(token, source) {
+    const cfg = getAutoConfig();
+    const filters = getActiveFilters();
+    const mc = token.market_cap || token.fdv || 0;
+    const now = Math.floor(Date.now() / 1000);
+    const ageMin = token.created_timestamp ? (now - token.created_timestamp) / 60 : 0;
+
+    // Apply filters (same as signal scanner)
+    if (ageMin > 0 && (ageMin < filters.minAgeMin || ageMin > filters.maxAgeMin)) return;
+    if (mc > 0 && (mc < filters.minMC || mc > filters.maxMC)) return;
+    if (token.is_wash_trading) return;
+
+    // Score with tracker boost
+    const baseScore = scoreToken(token, ageMin).score;
+    const trackerCfg = getTrackerConfig()[source];
+    const boost = trackerCfg?.boostScore || (source === 'smartmoney' ? 12 : 10);
+    const finalScore = Math.min(100, baseScore + boost);
+    const minScore = Math.max(35, cfg.minScore || 40);
+
+    if (finalScore < minScore) return;
+
+    token._ageMin = ageMin;
+    token._score = finalScore;
+    token._boostApplied = boost;
+    token._source = source;
+
+    // Format alert
+    const sourceLabel = source === 'smartmoney' ? '🧠 SmartMoney' : '👑 KOL';
+    const tagStr = (token._walletTags || []).filter(t => t !== 'wash_trader').join(', ');
+    const walletInfo = token._walletTwitter
+      ? `@${token._walletTwitter}`
+      : `${(token._walletAddress || '').slice(0, 8)}...`;
+
+    const lines = [
+      `${sourceLabel} Buy: <b>${token.symbol}</b>`,
+      ``,
+      `💰 Amount: $${(token._totalUsd || token._tradeAmountUsd || 0).toFixed(0)}`,
+      `👤 Wallet: ${walletInfo}${tagStr ? ` (${tagStr})` : ''}`,
+      token._uniqueWallets > 1 ? `👥 ${token._uniqueWallets} wallets buying` : null,
+      ``,
+      `📊 Score: ${baseScore} + ${boost} = ${finalScore}`,
+      `📈 MC: ${fmtMc(mc)} | Liq: ${fmtMc(token.liquidity || 0)}`,
+      ``,
+      `🔗 <a href="https://gmgn.ai/sol/token/${token.address}">GMGN</a>`,
+    ].filter(Boolean);
+
+    // Send alert + auto-buy (same pipeline as signal scanner)
+    sendTelegram(lines.join('\n'), {
+      parse_mode: 'HTML',
+      reply_markup: alertButtons(token.address),
+    }).catch(e => console.error(`[TRACKER/${source}] TG: ${e.message}`));
+
+    // Rate-limited auto-buy (delay to avoid Jupiter 429)
+    const buyDelay = Math.random() * 2000 + 1000; // 1-3s random delay
+    setTimeout(() => {
+      autoBuy(token).catch(e => console.error(`[TRACKER/${source}] Buy: ${e.message}`));
+    }, buyDelay);
+  }
+
+  function trackerTick(type) {
+    const scanningFlag = type === 'smartmoney' ? smScanning : kolScanning;
+    const setScanning = (v) => { if (type === 'smartmoney') smScanning = v; else kolScanning = v; };
+    const trackerCfg = getTrackerConfig()[type];
+
+    if (!trackerCfg?.enabled) {
+      setTimeout(() => trackerTick(type), 30000);
+      return;
+    }
+    if (scanningFlag) {
+      console.log(`[TRACKER/${type}] Previous scan still running, skipping`);
+    } else {
+      setScanning(true);
+      runTrackerScan(type, (token) => trackerProcessToken(token, type))
+        .catch(e => console.error(`[TRACKER/${type}]`, e))
+        .finally(() => setScanning(false));
+    }
+    setTimeout(() => trackerTick(type), (trackerCfg.intervalSec || 30) * 1000);
+  }
+
+  setTimeout(() => trackerTick('smartmoney'), 7000);  // offset from signal scanner
+  setTimeout(() => trackerTick('kol'), 9000);          // offset from smartmoney
 
   // Start auto-trade position monitor
   startMonitor();
