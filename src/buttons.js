@@ -121,6 +121,12 @@ const MENU = {
       [{ text: `🔥 Hot: ${cfg.customFilters?.minHotLevel ?? 1}+`, callback_data: 'cfg_filter_minHotLevel' },
        { text: `👀 Visits: ${cfg.customFilters?.minVisitingCount ?? 20}+`, callback_data: 'cfg_filter_minVisitingCount' }],
     ] : []),
+    // Signal Scanner
+    [{ text: '📡 Signal Scanner', callback_data: 'noop' }],
+    [{ text: cfg.signalScanner?.enabled !== false ? '✅ Signal ON' : '❌ Signal OFF', callback_data: 'cfg_signal_toggle' },
+     { text: '⚙️ Settings', callback_data: 'menu_signal' }],
+    [{ text: `⏱ Sig: ${cfg.signalScanner?.intervalSec ?? 30}s`, callback_data: 'cfg_signal_input_intervalSec' },
+     { text: `💰 MC: ${fmtMc(cfg.signalScanner?.mcMin ?? 10000)}-${fmtMc(cfg.signalScanner?.mcMax ?? 500000)}`, callback_data: 'cfg_signal_mc' }],
     [{ text: '🔙 Back', callback_data: 'menu_main' }],
   ],
 
@@ -174,6 +180,25 @@ const MENU = {
     maxBotDegen: { label: 'Max Bot Degen Count', hint: 'e.g. 300', min: 5, max: 50000 },
   },
 
+  // Signal Scanner labels
+  signalLabels: {
+    intervalSec: { label: 'Signal Interval (sec)', hint: 'e.g. 30', min: 10, max: 300 },
+    mcMin: { label: 'Signal Min MC ($)', hint: 'e.g. 10000', min: 0, max: 10000000 },
+    mcMax: { label: 'Signal Max MC ($)', hint: 'e.g. 500000', min: 0, max: 100000000 },
+    signalRatio: { label: 'Signal Ratio', hint: 'e.g. 0.30 (30%)', min: 0.05, max: 1.0 },
+    minContribution: { label: 'Min Signal Contribution', hint: 'e.g. 10', min: 0, max: 50 },
+    maxContribution: { label: 'Max Signal Contribution', hint: 'e.g. 25', min: 5, max: 50 },
+    dedupTtlSec: { label: 'Global Dedup TTL (sec)', hint: 'e.g. 300', min: 30, max: 3600 },
+  },
+
+  // Signal type names (for weight editor)
+  signalNames: {
+    1: 'Price Spike', 2: 'Price Dump', 3: 'Volume Spike', 4: 'Large Buy',
+    5: 'Large Sell', 6: 'Smart Money Buy', 7: 'Smart Money Sell', 8: 'KOL Buy',
+    9: 'KOL Sell', 10: 'New Wallet Influx', 11: 'Holder Surge', 12: 'Liquidity Add',
+    13: 'Liquidity Remove', 17: 'Dev Activity', 18: 'Rug Warning (reject)',
+  },
+
   // Screener alert buttons
   alert: (mint) => [
     [{ text: '🛒 Buy 0.015', callback_data: `buy_0.015_${mint.slice(0, 8)}` },
@@ -207,7 +232,7 @@ function mainMenu() {
      { text: '📈 PNL', callback_data: 'menu_pnl' }],
     [{ text: '⚙️ Config', callback_data: 'menu_config' },
      { text: '💼 Wallet', callback_data: 'menu_wallet' }],
-    [{ text: source === 'trenches' ? '📋 Screener ⛏️' : '📋 Screener 🔥', callback_data: 'menu_screener' },
+    [{ text: source === 'trenches' ? '📋 Screener ⛏️' : source === 'signal' ? '📋 Screener 📡' : '📋 Screener 🔥', callback_data: 'menu_screener' },
      { text: '🔄 Refresh', callback_data: 'menu_refresh' }],
   ]};
 }
@@ -239,9 +264,9 @@ async function handleCallbackQuery(cq) {
   if (data === 'menu_screener') return sendScreenerMenu(chatId);
 
   // ── Screener source switch ──
-  if (data === 'screener_source_trending' || data === 'screener_source_trenches') {
+  if (data === 'screener_source_trending' || data === 'screener_source_trenches' || data === 'screener_source_signal') {
     const { updateAutoConfig } = require('../src/autotrade');
-    const newSource = data === 'screener_source_trending' ? 'trending' : 'trenches';
+    const newSource = data === 'screener_source_trending' ? 'trending' : data === 'screener_source_signal' ? 'signal' : 'trenches';
     updateAutoConfig({ screenerSource: newSource });
     return sendScreenerMenu(chatId);
   }
@@ -303,6 +328,20 @@ async function handleCallbackQuery(cq) {
 
   // ── Noop (section headers) ──
   if (data === 'noop') return;
+
+  // ── Signal Scanner handlers ──
+  if (data === 'menu_signal') return sendSignalMenu(chatId);
+  if (data === 'cfg_signal_toggle') return cfgSignalToggle(chatId, msgId, queryId);
+  if (data === 'cfg_signal_mc') return cfgSignalMcMenu(chatId);
+  if (data === 'cfg_signal_anti_dc') return cfgSignalAntiDcToggle(chatId, msgId, queryId);
+  if (data === 'cfg_signal_weights') return cfgSignalWeightsMenu(chatId);
+  if (data === 'cfg_signal_weight_edit') return cfgSignalWeightSelectMenu(chatId);
+  const sigInputMatch = data.match(/^cfg_signal_input_(.+)$/);
+  if (sigInputMatch) return cfgSignalPromptInput(chatId, sigInputMatch[1]);
+  const sigWeightMatch = data.match(/^cfg_signal_weight_(\d+)$/);
+  if (sigWeightMatch) return cfgSignalWeightPromptInput(chatId, parseInt(sigWeightMatch[1]));
+  const sigWeightSetMatch = data.match(/^cfg_signal_wset_(\d+)_(-?\d+)$/);
+  if (sigWeightSetMatch) return cfgSignalWeightSet(chatId, parseInt(sigWeightSetMatch[1]), parseInt(sigWeightSetMatch[2]));
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -367,6 +406,38 @@ async function handlePendingInput(chatId, text) {
     return true;
   }
 
+  // Signal Scanner field
+  if (pending.type === 'signal') {
+    const { updateAutoConfig, getAutoConfig } = require('../src/autotrade');
+    const cfg = getAutoConfig();
+    const key = pending.signalKey;
+
+    // Weight fields: w1, w2, ... w18
+    if (key.startsWith('w')) {
+      const typeId = parseInt(key.slice(1));
+      const w = { ...(cfg.signalScanner?.signalWeights || {}) };
+      w[typeId] = num;
+      updateAutoConfig({ signalScanner: { ...(cfg.signalScanner || {}), signalWeights: w } });
+      pendingInputs.delete(chatId);
+      await cfgSignalWeightPromptInput(chatId, typeId);
+      return true;
+    }
+
+    // Dedup TTL
+    if (key === 'dedupTtlSec') {
+      updateAutoConfig({ dedup: { ...(cfg.dedup || {}), globalTtlSec: num } });
+      pendingInputs.delete(chatId);
+      await sendSignalMenu(chatId);
+      return true;
+    }
+
+    // Other signal scanner fields
+    updateAutoConfig({ signalScanner: { ...(cfg.signalScanner || {}), [key]: num } });
+    pendingInputs.delete(chatId);
+    await sendSignalMenu(chatId);
+    return true;
+  }
+
   // Regular config field
   updateAutoConfig({ [pending.configKey]: num });
   pendingInputs.delete(chatId);
@@ -406,7 +477,7 @@ async function sendMainMenu(chatId) {
     cfg.mode === 'dry_run' ? `🟡 Mode: DRY RUN (no real trades)` : null,
     `💰 Buy: ${cfg.buyAmountSol} SOL | 🟡 Soft SL: -${cfg.softSlPct || 15}%/${cfg.softSlWaitSec || 30}s | 🛑 Hard SL: -${cfg.hardSlPct || cfg.slPct || 40}%`,
     `📉 Trail: ${cfg.trailingDropPct}% | 📊 Score: ${cfg.minScore}`,
-    `📡 Source: ${cfg.screenerSource === 'trenches' ? '⛏️ Trenches' : '🔥 Trending'}`,
+    `📡 Source: ${cfg.screenerSource === 'trenches' ? '⛏️ Trenches' : cfg.screenerSource === 'signal' ? '📡 Signal' : '🔥 Trending'}`,
     ``,
     `Select option:`,
   ].filter(Boolean);
@@ -556,7 +627,7 @@ async function sendConfigMenu(chatId) {
       ...psLines,
       `  → ${remaining > 0 ? remaining : 0}% trailing TP/SL`,
       ``,
-      `🔍 Screener: ${cfg.filterMode === 'custom' ? 'Custom' : 'Default'} (${cfg.screenerSource === 'trenches' ? '⛏️ Trenches' : '🔥 Trending'})`,
+      `🔍 Screener: ${cfg.filterMode === 'custom' ? 'Custom' : 'Default'} (${cfg.screenerSource === 'trenches' ? '⛏️ Trenches' : cfg.screenerSource === 'signal' ? '📡 Signal' : '🔥 Trending'})`,
       ...(cfg.filterMode === 'custom' ? [
         `  Age: ${cfg.customFilters?.minAgeMin ?? 15}-${cfg.customFilters?.maxAgeMin ?? 120}m`,
         `  MC: ${fmtMc(cfg.customFilters?.minMC ?? 20000)}-${fmtMc(cfg.customFilters?.maxMC ?? 500000)}`,
@@ -568,6 +639,8 @@ async function sendConfigMenu(chatId) {
         `  5m: ${cfg.customFilters?.minPriceChange5m ?? -10}%~${cfg.customFilters?.maxPriceChange5m ?? 35}% | 1h: &lt;${cfg.customFilters?.maxPriceChange1h ?? 150}%`,
         `  Hot: ${cfg.customFilters?.minHotLevel ?? 1}+ | Visits: ${cfg.customFilters?.minVisitingCount ?? 20}+`,
       ] : []),
+      ``,
+      `📡 Signal: ${cfg.signalScanner?.enabled !== false ? '✅ ON' : '❌ OFF'} | Interval: ${cfg.signalScanner?.intervalSec ?? 30}s | MC: ${fmtMc(cfg.signalScanner?.mcMin ?? 10000)}-${fmtMc(cfg.signalScanner?.mcMax ?? 500000)}`,
       ``,
       `Tap button to edit value:`,
     ];
@@ -881,7 +954,7 @@ async function sendScreenerMenu(chatId) {
   const lines = [
     `📋 <b>Screener</b>`,
     ``,
-    `📡 Source: <b>${source === 'trenches' ? '⛏️ Trenches (new tokens)' : '🔥 Trending (hot tokens)'}</b>`,
+    `📡 Source: <b>${source === 'trenches' ? '⛏️ Trenches (new tokens)' : source === 'signal' ? '📡 Signal (GMGN signals)' : '🔥 Trending (hot tokens)'}</b>`,
     `📊 Tokens scanned: ${Object.keys(seen).length}`,
     ``,
   ];
@@ -901,6 +974,9 @@ async function sendScreenerMenu(chatId) {
     [
       { text: source === 'trending' ? '🔥 Trending ✅' : '🔥 Trending', callback_data: 'screener_source_trending' },
       { text: source === 'trenches' ? '⛏️ Trenches ✅' : '⛏️ Trenches', callback_data: 'screener_source_trenches' },
+    ],
+    [
+      { text: source === 'signal' ? '📡 Signal ✅' : '📡 Signal', callback_data: 'screener_source_signal' },
     ],
     [{ text: '🔙 Back', callback_data: 'menu_main' }],
   ];
@@ -1166,6 +1242,243 @@ async function cfgFilterPromptInput(chatId, filterKey) {
 }
 
 // ═══════════════════════════════════════════════════════════
+// SIGNAL SCANNER HANDLERS
+// ═══════════════════════════════════════════════════════════
+
+async function sendSignalMenu(chatId) {
+  clearPendingInput(chatId);
+  const { getAutoConfig } = require('../src/autotrade');
+  const cfg = getAutoConfig();
+  const sig = cfg.signalScanner || {};
+  const w = sig.signalWeights || {};
+  const dc = sig.antiDoubleCount || { enabled: true, factor: 0.5 };
+  const dedupTtl = cfg.dedup?.globalTtlSec ?? 300;
+
+  const names = MENU.signalNames;
+  const weightLines = Object.entries(names).map(([id, name]) => {
+    const defW = DEFAULT_SIGNAL_WEIGHTS[id] ?? 0;
+    const curW = w[id] ?? defW;
+    const changed = curW !== defW ? ' ✏️' : '';
+    const icon = id === '18' ? '🚫' : (curW > 0 ? '🟢' : curW < 0 ? '🔴' : '⚪');
+    return `  ${icon} ${name}: ${curW > 0 ? '+' : ''}${curW}${changed}`;
+  });
+
+  const lines = [
+    `📡 <b>Signal Scanner</b>`,
+    ``,
+    `Status: ${sig.enabled !== false ? '✅ ON' : '❌ OFF'}`,
+    `⏱ Interval: ${sig.intervalSec ?? 30}s`,
+    `💰 MC Range: ${fmtMc(sig.mcMin ?? 10000)} - ${fmtMc(sig.mcMax ?? 500000)}`,
+    ``,
+    `⚙️ <b>Scoring:</b>`,
+    `  📊 Signal Ratio: ${((sig.signalRatio ?? 0.30) * 100).toFixed(0)}%`,
+    `  ⬇️ Min Contribution: ${sig.minContribution ?? 10}`,
+    `  ⬆️ Max Contribution: ${sig.maxContribution ?? 25}`,
+    `  🔄 Anti-Double-Count: ${dc.enabled !== false ? `✅ ON (${dc.factor ?? 0.5}x)` : '❌ OFF'}`,
+    `  🌐 Dedup TTL: ${dedupTtl}s`,
+    ``,
+    `📋 <b>Signal Weights:</b>`,
+    ...weightLines,
+    ``,
+    `✏️ = modified from default`,
+  ];
+
+  const buttons = [
+    [{ text: sig.enabled !== false ? '🟢 Signal ON' : '🔴 Signal OFF', callback_data: 'cfg_signal_toggle' }],
+    [{ text: `⏱ Interval: ${sig.intervalSec ?? 30}s`, callback_data: 'cfg_signal_input_intervalSec' }],
+    [{ text: `💰 MC: ${fmtMc(sig.mcMin ?? 10000)}`, callback_data: 'cfg_signal_input_mcMin' },
+     { text: `→ ${fmtMc(sig.mcMax ?? 500000)}`, callback_data: 'cfg_signal_input_mcMax' }],
+    [{ text: `📊 Ratio: ${((sig.signalRatio ?? 0.30) * 100).toFixed(0)}%`, callback_data: 'cfg_signal_input_signalRatio' },
+     { text: `⬇️ Min: ${sig.minContribution ?? 10}`, callback_data: 'cfg_signal_input_minContribution' }],
+    [{ text: `⬆️ Max: ${sig.maxContribution ?? 25}`, callback_data: 'cfg_signal_input_maxContribution' },
+     { text: dc.enabled !== false ? '🔄 Anti-DC ON' : '🔄 Anti-DC OFF', callback_data: 'cfg_signal_anti_dc' }],
+    [{ text: `🌐 Dedup: ${dedupTtl}s`, callback_data: 'cfg_signal_input_dedupTtlSec' }],
+    [{ text: '📋 Edit Weights', callback_data: 'cfg_signal_weight_edit' }],
+    [{ text: '🔙 Back', callback_data: 'menu_config' }],
+  ];
+
+  await tgApi('sendMessage', {
+    chat_id: chatId, text: lines.join('\n'),
+    parse_mode: 'HTML', disable_web_page_preview: true,
+    reply_markup: { inline_keyboard: buttons },
+  });
+}
+
+const DEFAULT_SIGNAL_WEIGHTS = {
+  1: 8, 2: -3, 3: 8, 4: 10, 5: -5, 6: 12, 7: -5, 8: 10,
+  9: -5, 10: 8, 11: 8, 12: 5, 13: -5, 17: -3, 18: 0,
+};
+
+async function cfgSignalToggle(chatId, msgId, queryId) {
+  const { getAutoConfig, updateAutoConfig } = require('../src/autotrade');
+  const cfg = getAutoConfig();
+  const current = cfg.signalScanner?.enabled !== false;
+  updateAutoConfig({ signalScanner: { ...(cfg.signalScanner || {}), enabled: !current } });
+  const newCfg = getAutoConfig();
+  await tgApi('editMessageReplyMarkup', {
+    chat_id: chatId, message_id: msgId,
+    reply_markup: JSON.stringify(configButtons(newCfg)),
+  });
+  await tgApi('answerCallbackQuery', { callback_query_id: queryId, text: `Signal Scanner ${!current ? 'ON' : 'OFF'}` });
+}
+
+async function cfgSignalMcMenu(chatId) {
+  const { getAutoConfig } = require('../src/autotrade');
+  const cfg = getAutoConfig();
+  const sig = cfg.signalScanner || {};
+
+  const buttons = [
+    [{ text: `💰 Min: ${fmtMc(sig.mcMin ?? 10000)}`, callback_data: 'cfg_signal_input_mcMin' },
+     { text: `💰 Max: ${fmtMc(sig.mcMax ?? 500000)}`, callback_data: 'cfg_signal_input_mcMax' }],
+    [{ text: '🔙 Back', callback_data: 'menu_signal' }],
+  ];
+
+  await tgApi('sendMessage', {
+    chat_id: chatId,
+    text: `✏️ <b>Signal MC Range</b>\n\nMin: ${fmtMc(sig.mcMin ?? 10000)}\nMax: ${fmtMc(sig.mcMax ?? 500000)}\n\nTap to edit:`,
+    parse_mode: 'HTML',
+    reply_markup: { inline_keyboard: buttons },
+  });
+}
+
+async function cfgSignalAntiDcToggle(chatId, msgId, queryId) {
+  const { getAutoConfig, updateAutoConfig } = require('../src/autotrade');
+  const cfg = getAutoConfig();
+  const dc = cfg.signalScanner?.antiDoubleCount || { enabled: true, factor: 0.5 };
+  const newDc = { ...dc, enabled: dc.enabled === false ? true : false };
+  updateAutoConfig({ signalScanner: { ...(cfg.signalScanner || {}), antiDoubleCount: newDc } });
+  await tgApi('answerCallbackQuery', { callback_query_id: queryId, text: `Anti-DC ${newDc.enabled ? 'ON' : 'OFF'}` });
+  await sendSignalMenu(chatId);
+}
+
+async function cfgSignalPromptInput(chatId, signalKey) {
+  const field = MENU.signalLabels[signalKey];
+  if (!field) return;
+
+  const { getAutoConfig } = require('../src/autotrade');
+  const cfg = getAutoConfig();
+  const current = signalKey === 'dedupTtlSec' ? (cfg.dedup?.globalTtlSec ?? 300) : (cfg.signalScanner?.[signalKey] ?? 0);
+
+  pendingInputs.set(chatId, {
+    type: 'signal',
+    signalKey,
+    label: field.label,
+    hint: field.hint,
+    min: field.min,
+    max: field.max,
+    current,
+  });
+
+  await tgApi('sendMessage', {
+    chat_id: chatId,
+    text: `✏️ <b>${field.label}</b>\n\nCurrent: <code>${current}</code>\n\nType new value (${field.hint}):`,
+    parse_mode: 'HTML',
+  });
+}
+
+async function cfgSignalWeightsMenu(chatId) {
+  const { getAutoConfig } = require('../src/autotrade');
+  const cfg = getAutoConfig();
+  const w = cfg.signalScanner?.signalWeights || {};
+  const names = MENU.signalNames;
+
+  const lines = [`📋 <b>Signal Weights</b>\n`];
+  const buttons = [];
+
+  for (const [id, name] of Object.entries(names)) {
+    const defW = DEFAULT_SIGNAL_WEIGHTS[id] ?? 0;
+    const curW = w[id] ?? defW;
+    const icon = id === '18' ? '🚫' : (curW > 0 ? '🟢' : curW < 0 ? '🔴' : '⚪');
+    lines.push(`${icon} <b>${name}</b>: ${curW > 0 ? '+' : ''}${curW}`);
+    buttons.push([
+      { text: `${icon} ${name}: ${curW > 0 ? '+' : ''}${curW}`, callback_data: `cfg_signal_weight_${id}` },
+    ]);
+  }
+
+  buttons.push([{ text: '🔙 Back', callback_data: 'menu_signal' }]);
+
+  await tgApi('sendMessage', {
+    chat_id: chatId, text: lines.join('\n'),
+    parse_mode: 'HTML',
+    reply_markup: { inline_keyboard: buttons },
+  });
+}
+
+async function cfgSignalWeightSelectMenu(chatId) {
+  return cfgSignalWeightsMenu(chatId);
+}
+
+async function cfgSignalWeightPromptInput(chatId, typeId) {
+  const name = MENU.signalNames[typeId];
+  if (!name) return;
+
+  const { getAutoConfig } = require('../src/autotrade');
+  const cfg = getAutoConfig();
+  const w = cfg.signalScanner?.signalWeights || {};
+  const defW = DEFAULT_SIGNAL_WEIGHTS[typeId] ?? 0;
+  const current = w[typeId] ?? defW;
+
+  // Quick-set buttons: positive range and negative range
+  const buttons = [];
+  if (typeId !== '18') {
+    // Positive quick set
+    buttons.push([
+      { text: '+3', callback_data: `cfg_signal_wset_${typeId}_3` },
+      { text: '+5', callback_data: `cfg_signal_wset_${typeId}_5` },
+      { text: '+8', callback_data: `cfg_signal_wset_${typeId}_8` },
+      { text: '+10', callback_data: `cfg_signal_wset_${typeId}_10` },
+      { text: '+12', callback_data: `cfg_signal_wset_${typeId}_12` },
+    ]);
+    // Negative quick set
+    buttons.push([
+      { text: '-1', callback_data: `cfg_signal_wset_${typeId}_-1` },
+      { text: '-3', callback_data: `cfg_signal_wset_${typeId}_-3` },
+      { text: '-5', callback_data: `cfg_signal_wset_${typeId}_-5` },
+      { text: '-8', callback_data: `cfg_signal_wset_${typeId}_-8` },
+      { text: '-10', callback_data: `cfg_signal_wset_${typeId}_-10` },
+    ]);
+    // Reset to default
+    buttons.push([
+      { text: `↩️ Reset (${defW > 0 ? '+' : ''}${defW})`, callback_data: `cfg_signal_wset_${typeId}_${defW}` },
+    ]);
+  } else {
+    // Type 18: hard reject toggle (weight 0 = disabled, weight 1 = reject)
+    buttons.push([
+      { text: '🚫 Reject', callback_data: `cfg_signal_wset_${typeId}_1` },
+      { text: '⚪ Ignore', callback_data: `cfg_signal_wset_${typeId}_0` },
+    ]);
+  }
+  buttons.push([{ text: '✏️ Custom Value', callback_data: `cfg_signal_input_w${typeId}` }]);
+  buttons.push([{ text: '🔙 Back', callback_data: 'cfg_signal_weights' }]);
+
+  pendingInputs.set(chatId, {
+    type: 'signal',
+    signalKey: `w${typeId}`,
+    label: `Weight: ${name}`,
+    hint: 'e.g. 8 (positive boost) or -5 (negative penalty)',
+    min: -50,
+    max: 50,
+    current,
+  });
+
+  await tgApi('sendMessage', {
+    chat_id: chatId,
+    text: `✏️ <b>${name}</b>\n\nCurrent: <code>${current > 0 ? '+' : ''}${current}</code>\nDefault: <code>${defW > 0 ? '+' : ''}${defW}</code>\n\nTap quick-set or type custom:`,
+    parse_mode: 'HTML',
+    reply_markup: { inline_keyboard: buttons },
+  });
+}
+
+async function cfgSignalWeightSet(chatId, typeId, value) {
+  const { getAutoConfig, updateAutoConfig } = require('../src/autotrade');
+  const cfg = getAutoConfig();
+  const w = { ...(cfg.signalScanner?.signalWeights || {}) };
+  w[typeId] = value;
+  updateAutoConfig({ signalScanner: { ...(cfg.signalScanner || {}), signalWeights: w } });
+  await cfgSignalWeightPromptInput(chatId, typeId);
+}
+
+// ═══════════════════════════════════════════════════════════
 // ACTION HANDLERS
 // ═══════════════════════════════════════════════════════════
 
@@ -1211,7 +1524,7 @@ async function handleBuyButton(chatId, mintPrefix, amount) {
   const path = require('path');
   let seen = {};
   // Try both trending and trenches seen files
-  for (const src of ['trending', 'trenches']) {
+  for (const src of ['trending', 'trenches', 'signal']) {
     try { 
       const data = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'output', `gmgn-seen-${src}.json`), 'utf8'));
       Object.assign(seen, data);
@@ -1337,4 +1650,5 @@ module.exports = {
   configButtons,
   alertButtons,
   autoBuyButtons,
+  sendSignalMenu,
 };
