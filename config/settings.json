@@ -1,0 +1,23 @@
+{
+  "wsUrl": "wss://pumpportal.fun/api/data",
+  "filters": {
+    "minSolAmount": 1.0,
+    "maxSolAmount": 50,
+    "minMarketCapSol": 25,
+    "maxMarketCapSol": 100,
+    "requireMayhemMode": false,
+    "excludePools": [],
+    "minInitialBuyTokens": 5000000,
+    "minQualityScore": 45,
+    "maxRugRisk": 35
+  },
+  "alerts": {
+    "enabled": true,
+    "cooldownSeconds": 5,
+    "maxPerHour": 60
+  },
+  "metadata": {
+    "fetchUri": true,
+    "timeoutMs": 5000
+  }
+}

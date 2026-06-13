@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+
+# Environment / Credentials — NEVER commit
+.env
+.env.local
+.env.*.local
+config/wallet.json
+config/wallet*.json
+*.pem
+*.key
+
+# Output / Data
+output/
+data/
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temp
+/tmp/
+config/telegram.json
+*.save
+*.sqlite
+*.db
