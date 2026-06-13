@@ -272,6 +272,29 @@ async function handleCallbackQuery(cq) {
   }
   if (data === 'menu_refresh') return sendMainMenu(chatId);
 
+  // ── PNL Reset ──
+  if (data === 'pnl_reset_live' || data === 'pnl_reset_dry') {
+    const isDry = data === 'pnl_reset_dry';
+    const fs = require('fs');
+    const path = require('path');
+    const file = isDry
+      ? path.join(__dirname, '..', 'data', 'dry-run-closed.json')
+      : path.join(__dirname, '..', 'data', 'closed-positions.json');
+    try {
+      fs.writeFileSync(file, '[]');
+      const label = isDry ? 'Dry Run' : 'Live';
+      await tgApi('sendMessage', {
+        chat_id: chatId,
+        text: `✅ <b>${label} PNL reset</b>\n\nAll closed positions cleared.`,
+        parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: [[{ text: '📈 PNL', callback_data: 'menu_pnl' }, { text: '🏠 Menu', callback_data: 'menu_main' }]] }
+      });
+    } catch (e) {
+      await tgApi('sendMessage', { chat_id: chatId, text: `❌ Reset failed: ${e.message}`, parse_mode: 'HTML' });
+    }
+    return;
+  }
+
   // ── Close Rugs ──
   if (data === 'close_rugs') return handleCloseRugs(chatId);
   if (data === 'close_empty_accounts') return handleCloseEmptyAccounts(chatId);

@@ -378,20 +378,19 @@ async function executePartialSell(pos, partial, currentPrice) {
 }
 
 // ─── Execute Full Exit (trailing/SL) ───────────────────
-async function executeFullExit(pos, reason, pnlResult) {
+async function executeFullExit(pos, reason, quoteSolOut = 0) {
   console.log(`[AUTO] Full exit ${pos.symbol} (${reason})`);
 
   // DRY RUN — virtual full exit
   if (pos.isDryRun) {
-    const virtualSol = pos.solSpent + (pnlResult?.pnl || 0);
-    const closed = dryRun.closeDryPosition(pos.tokenMint, virtualSol, reason);
+    const closed = dryRun.closeDryPosition(pos.tokenMint, quoteSolOut, reason);
 
     const isRug = closed.pnlPct <= -80;
     const emoji = closed.pnl >= 0 ? '🟢' : (isRug ? '💀' : '🔴');
     const header = isRug ? `🟡 <b>DRY RUN — RUG — ${pos.symbol}</b>` : `${emoji} <b>DRY RUN — Auto-Sell (${reason}): ${pos.symbol}</b>`;
     await sendTelegram(
       `${header}\n\n` +
-      `💰 Would get: ~${virtualSol.toFixed(4)} SOL\n` +
+      `💰 Would get: ~${quoteSolOut.toFixed(4)} SOL\n` +
       `📊 PNL: ${closed.pnl >= 0 ? '+' : ''}${closed.pnl.toFixed(4)} SOL (${closed.pnlPct}%)\n` +
       `📝 Reason: ${reason}\n` +
       `📈 Peak was: +${pos.peakPnlPct ?? '?'}%`,
@@ -864,13 +863,13 @@ async function checkPositions() {
         if (action.type === 'partial') {
           await executePartialSell(pos, action, currentPrice);
         } else if (action.type === 'trailing') {
-          await executeFullExit(pos, `trailing (peak +${action.peakPnl}%, dropped ${action.dropFromPeak}%)`, { pnl: pnlSol, pnlPct });
+          await executeFullExit(pos, `trailing (peak +${action.peakPnl}%, dropped ${action.dropFromPeak}%)`, quoteSolOut);
           break; // position closed, skip remaining actions
         } else if (action.type === 'hard_sl') {
-          await executeFullExit(pos, `HARD SL (-${hardSlPct}%)`, { pnl: pnlSol, pnlPct });
+          await executeFullExit(pos, `HARD SL (-${hardSlPct}%)`, quoteSolOut);
           break; // position closed
         } else if (action.type === 'soft_sl') {
-          await executeFullExit(pos, `Soft SL (waited ${action.waited}s, no recovery)`, { pnl: pnlSol, pnlPct });
+          await executeFullExit(pos, `Soft SL (waited ${action.waited}s, no recovery)`, quoteSolOut);
           break; // position closed
         }
       }

@@ -390,73 +390,104 @@ async function handlePositions(chatId) {
   }
 }
 
-// ─── /pnl — show PNL summary ──────────────────────────
+// ─── /pnl — show PNL summary (combined live + dry-run) ──
 async function handlePnl(chatId) {
-  const cfg = autotrade.getAutoConfig();
-  const isDryMode = cfg.mode === 'dry_run';
-  const open = isDryMode ? dryRun.getOpenDryPositions() : positions.getOpenPositions();
-  const closed = isDryMode ? dryRun.getClosedDryPositions(100) : positions.getClosedPositions(100);
+  // Always show BOTH live and dry-run
+  const liveOpen = positions.getOpenPositions();
+  const liveClosed = positions.getClosedPositions(100);
+  const dryOpen = dryRun.getOpenDryPositions();
+  const dryClosed = dryRun.getClosedDryPositions(100);
 
-  let openPnl = 0;
-
-  // Calculate open PNL using Jupiter quote (same as checkPositions)
-  for (const pos of open) {
-    try {
-      const { getQuote, SOL_MINT } = require('../src/trading');
-      const rawAmount = Math.floor(pos.remainingTokens * Math.pow(10, pos.decimals));
-      const quote = await getQuote(pos.tokenMint, SOL_MINT, rawAmount, 500);
-      const quoteSolOut = parseFloat(quote.outAmount) / 1e9;
-      const totalValue = quoteSolOut + (pos.totalSolReceived || 0);
-      openPnl += totalValue - pos.solSpent;
-    } catch {
-      // fallback: skip if no quote
+  // Calculate open PNL using Jupiter quote
+  async function calcOpenPnl(openPos) {
+    let pnl = 0;
+    for (const pos of openPos) {
+      try {
+        const { getQuote, SOL_MINT } = require('../src/trading');
+        const rawAmount = Math.floor(pos.remainingTokens * Math.pow(10, pos.decimals));
+        const quote = await getQuote(pos.tokenMint, SOL_MINT, rawAmount, 500);
+        const quoteSolOut = parseFloat(quote.outAmount) / 1e9;
+        const totalValue = quoteSolOut + (pos.totalSolReceived || 0);
+        pnl += totalValue - pos.solSpent;
+      } catch {}
     }
+    return pnl;
   }
+
+  const liveOpenPnl = await calcOpenPnl(liveOpen);
+  const dryOpenPnl = await calcOpenPnl(dryOpen);
 
   // Today's PNL (reset at 7 AM WIB = 0:00 UTC)
   const now = new Date();
   const utcMidnight = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
-  const todayClosed = closed.filter(c => c.closedAt && new Date(c.closedAt) >= utcMidnight);
-  const todayPnl = todayClosed.reduce((sum, c) => sum + (c.pnl || 0), 0);
-  const todayWins = todayClosed.filter(c => (c.pnl || 0) > 0).length;
-  const todayLosses = todayClosed.length - todayWins;
-  const todayWinRate = todayClosed.length > 0 ? (todayWins / todayClosed.length * 100).toFixed(0) : '?';
 
-  // Total PNL (all-time)
-  const totalClosedPnl = closed.reduce((sum, c) => sum + (c.pnl || 0), 0);
-  const totalWins = closed.filter(c => (c.pnl || 0) > 0).length;
-  const totalLosses = closed.length - totalWins;
-  const totalWinRate = closed.length > 0 ? (totalWins / closed.length * 100).toFixed(0) : '?';
+  function calcSummary(closed, openPnl, openCount) {
+    const todayClosed = closed.filter(c => c.closedAt && new Date(c.closedAt) >= utcMidnight);
+    const todayPnl = todayClosed.reduce((sum, c) => sum + (c.pnl || 0), 0);
+    const todayWins = todayClosed.filter(c => (c.pnl || 0) > 0).length;
+    const todayLosses = todayClosed.length - todayWins;
+    const totalPnl = closed.reduce((sum, c) => sum + (c.pnl || 0), 0);
+    const totalWins = closed.filter(c => (c.pnl || 0) > 0).length;
+    const totalLosses = closed.length - totalWins;
+    return { todayClosed, todayPnl, todayWins, todayLosses, totalPnl, totalWins, totalLosses, openPnl, openCount };
+  }
 
-  // Recent trades (last 10)
-  const recent = closed.slice(0, 10);
+  const live = calcSummary(liveClosed, liveOpenPnl, liveOpen.length);
+  const dry = calcSummary(dryClosed, dryOpenPnl, dryOpen.length);
+
+  // Combined totals
+  const combinedTotalPnl = live.totalPnl + dry.totalPnl;
+  const combinedTodayPnl = live.todayPnl + dry.todayPnl;
+  const combinedOpenPnl = live.openPnl + dry.openPnl;
+
+  const fmt = (v) => v >= 0 ? `+${v.toFixed(4)}` : v.toFixed(4);
+  const wr = (w, l) => (w + l) > 0 ? `${Math.round(w / (w + l) * 100)}% (${w}W/${l}L)` : '?';
+
+  // Recent trades (merged, sorted by date)
+  const allRecent = [
+    ...liveClosed.map(c => ({ ...c, _mode: '🔴' })),
+    ...dryClosed.map(c => ({ ...c, _mode: '🟡' })),
+  ].sort((a, b) => new Date(b.closedAt || 0) - new Date(a.closedAt || 0)).slice(0, 10);
 
   const lines = [
-    isDryMode ? `🟡 <b>PNL Summary — DRY RUN</b>` : `📊 <b>PNL Summary</b>`,
+    `📊 <b>PNL Summary</b>`,
     ``,
-    `🕐 All-Time: ${closed.length} trades`,
-    `💰 Total PNL: ${totalClosedPnl >= 0 ? '+' : ''}${totalClosedPnl.toFixed(4)} SOL`,
-    `🎯 Win Rate: ${totalWinRate}% (${totalWins}W/${totalLosses}L)`,
+    `🕐 All-Time: ${liveClosed.length + dryClosed.length} trades`,
+    `💰 Total: ${fmt(combinedTotalPnl)} SOL`,
+    `  🔴 Live: ${fmt(live.totalPnl)} SOL | 🟡 Dry: ${fmt(dry.totalPnl)} SOL`,
     ``,
-    `📅 Today (7AM WIB): ${todayClosed.length} trades`,
-    `💰 Today PNL: ${todayPnl >= 0 ? '+' : ''}${todayPnl.toFixed(4)} SOL`,
-    `🎯 Win Rate: ${todayWinRate}% (${todayWins}W/${todayLosses}L)`,
+    `📅 Today: ${live.todayClosed.length + dry.todayClosed.length} trades`,
+    `💰 Today: ${fmt(combinedTodayPnl)} SOL`,
+    `  🔴 Live: ${fmt(live.todayPnl)} SOL | 🟡 Dry: ${fmt(dry.todayPnl)} SOL`,
     ``,
-    `📈 Open Positions: ${open.length}`,
-    `💰 Open PNL: ${openPnl >= 0 ? '+' : ''}${openPnl.toFixed(4)} SOL`,
+    `📈 Open: ${live.openCount + dry.openCount} positions`,
+    `💰 Open PNL: ${fmt(combinedOpenPnl)} SOL`,
+    `  🔴 Live: ${fmt(live.openPnl)} SOL | 🟡 Dry: ${fmt(dry.openPnl)} SOL`,
     ``,
     `📋 Recent (last 10):`,
   ];
 
-  for (const c of recent) {
-    const emoji = c.pnl >= 0 ? '🟢' : '🔴';
+  for (const c of allRecent) {
+    const emoji = c._mode;
+    const pnlStr = fmt(c.pnl || 0);
+    const pctStr = c.pnlPct != null ? `(${c.pnlPct >= 0 ? '+' : ''}${c.pnlPct.toFixed(1)}%)` : '';
     const reason = c.closeReason || 'manual';
-    const pnlStr = c.pnl >= 0 ? `+${c.pnl.toFixed(4)}` : `${c.pnl.toFixed(4)}`;
-    const pctStr = c.pnlPct != null ? (c.pnlPct >= 0 ? `+${c.pnlPct.toFixed(1)}` : `${c.pnlPct.toFixed(1)}`) : '';
-    lines.push(`${emoji} ${c.symbol}: ${pnlStr} SOL ${pctStr ? `(${pctStr}%)` : ''} ${reason}`);
+    lines.push(`${emoji} ${c.symbol}: ${pnlStr} SOL ${pctStr} ${reason}`);
   }
 
-  await tgApi('sendMessage', { chat_id: chatId, text: lines.join('\n'), parse_mode: 'HTML', reply_markup: mainMenu() });
+  await tgApi('sendMessage', {
+    chat_id: chatId,
+    text: lines.join('\n'),
+    parse_mode: 'HTML',
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: '🗑️ Reset Live PNL', callback_data: 'pnl_reset_live' },
+         { text: '🗑️ Reset Dry PNL', callback_data: 'pnl_reset_dry' }],
+        [{ text: '🔄 Refresh', callback_data: 'menu_pnl' },
+         { text: '🏠 Menu', callback_data: 'menu_main' }],
+      ]
+    }
+  });
 }
 
 // ─── /remove — remove from screening list
