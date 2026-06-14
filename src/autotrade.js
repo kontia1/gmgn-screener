@@ -89,15 +89,16 @@ function loadAutoConfig() {
 }
 
 // ─── Global Buy Lock ────────────────────────────────────
-const buyLocks = new Map();  // CA → timestamp
+const buyLocks = new Map();  // CA → { ts, ttlMs }
+const POST_CLOSE_LOCK_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 function isBuyLocked(mint) {
   const cfg = loadAutoConfig();
   if (!cfg.buyLock?.enabled) return false;
   if (!buyLocks.has(mint)) return false;
-  const ttlMs = (cfg.buyLock?.ttlSec || 300) * 1000;
-  const elapsed = Date.now() - buyLocks.get(mint);
-  if (elapsed > ttlMs) {
+  const lock = buyLocks.get(mint);
+  const elapsed = Date.now() - lock.ts;
+  if (elapsed > lock.ttlMs) {
     buyLocks.delete(mint);
     return false;
   }
@@ -105,15 +106,22 @@ function isBuyLocked(mint) {
 }
 
 function getBuyLockRemaining(mint) {
-  const cfg = loadAutoConfig();
-  const ttlMs = (cfg.buyLock?.ttlSec || 300) * 1000;
   if (!buyLocks.has(mint)) return 0;
-  const remaining = ttlMs - (Date.now() - buyLocks.get(mint));
+  const lock = buyLocks.get(mint);
+  const remaining = lock.ttlMs - (Date.now() - lock.ts);
   return Math.max(0, Math.ceil(remaining / 1000));
 }
 
-function setBuyLock(mint) {
-  buyLocks.set(mint, Date.now());
+function setBuyLock(mint, ttlMs) {
+  const cfg = loadAutoConfig();
+  const defaultTtl = (cfg.buyLock?.ttlSec || 300) * 1000;
+  buyLocks.set(mint, { ts: Date.now(), ttlMs: ttlMs || defaultTtl });
+}
+
+// Set 24h lock after position close — prevents re-buying same token
+function setPostCloseLock(mint) {
+  buyLocks.set(mint, { ts: Date.now(), ttlMs: POST_CLOSE_LOCK_MS });
+  console.log(`[AUTO] 🔒 ${mint.slice(0, 8)}... locked for 24h (post-close)`);
 }
 
 function getBuyLockStatus() {
@@ -430,6 +438,7 @@ async function executePartialSell(pos, partial, currentPrice) {
 // ─── Execute Full Exit (trailing/SL) ───────────────────
 async function executeFullExit(pos, reason, quoteSolOut = 0) {
   console.log(`[AUTO] Full exit ${pos.symbol} (${reason})`);
+  setPostCloseLock(pos.tokenMint);
 
   // DRY RUN — virtual full exit
   if (pos.isDryRun) {
@@ -607,6 +616,7 @@ async function checkPositions() {
           const totalReceived = pos.totalSolReceived || 0;
           const pnl = totalReceived - (pos.solSpent || 0);
           closePosition(pos.tokenMint, totalReceived, 'none', 'wallet_empty');
+          setPostCloseLock(pos.tokenMint);
           console.log(`[AUTO] 🧹 ${pos.symbol}: wallet empty, auto-closed (PNL: ${pnl.toFixed(4)} SOL)`);
           sendTelegram(
             `🧹 <b>Auto-Closed: ${pos.symbol}</b>\n\n` +
@@ -668,6 +678,7 @@ async function checkPositions() {
                   const { closePosition } = require('./positions');
                   closePosition(pos.tokenMint, 0, 'none', 'dead_token');
                 }
+                setPostCloseLock(pos.tokenMint);
                 console.log(`[AUTO] 💀 ${pos.symbol}: dead token (NO_ROUTES x3), auto-closed`);
                 const totalReceived = pos.totalSolReceived || 0;
                 const actualLoss = (pos.solSpent || 0) - totalReceived;
@@ -740,6 +751,7 @@ async function checkPositions() {
             if (pos.isDryRun) {
               const virtualSol = quoteSolOut + (pos.totalSolReceived || 0);
               const closed = dryRun.closeDryPosition(pos.tokenMint, virtualSol, 'bundler_detected');
+              setPostCloseLock(pos.tokenMint);
               await sendTelegram(
                 `🟡 <b>DRY RUN — Auto-Sell (Bundler): ${pos.symbol}</b>\n\n` +
                 `📊 PNL: ${closed.pnl >= 0 ? '+' : ''}${closed.pnl.toFixed(4)} SOL (${closed.pnlPct}%)\n` +
@@ -750,6 +762,7 @@ async function checkPositions() {
                 const result = await sellAll(pos.tokenMint, autoConfig.walletLabel, 500);
                 if (result.success) {
                   const closed = closePosition(pos.tokenMint, result.outputSol, result.signature, 'bundler_detected');
+                  setPostCloseLock(pos.tokenMint);
                   const emoji = closed.pnl >= 0 ? '🟢' : '🔴';
                   await sendTelegram(
                     `${emoji} <b>Auto-Sell (Bundler): ${pos.symbol}</b>\n\n` +
@@ -802,6 +815,7 @@ async function checkPositions() {
             if (pos.isDryRun) {
               const virtualSol = quoteSolOut + (pos.totalSolReceived || 0);
               const closed = dryRun.closeDryPosition(pos.tokenMint, virtualSol, 'rug_signal');
+              setPostCloseLock(pos.tokenMint);
               await sendTelegram(
                 `🟡 <b>DRY RUN — Auto-Sell (Rug Signal): ${pos.symbol}</b>\n\n` +
                 `📊 PNL: ${closed.pnl >= 0 ? '+' : ''}${closed.pnl.toFixed(4)} SOL (${closed.pnlPct}%)\n` +
@@ -812,6 +826,7 @@ async function checkPositions() {
                 const result = await sellAll(pos.tokenMint, autoConfig.walletLabel, 500);
                 if (result.success) {
                   const closed = closePosition(pos.tokenMint, result.outputSol, result.signature, 'rug_signal');
+                  setPostCloseLock(pos.tokenMint);
                   const emoji = closed.pnl >= 0 ? '🟢' : '🔴';
                   await sendTelegram(
                     `${emoji} <b>Auto-Sell (Rug Signal): ${pos.symbol}</b>\n\n` +
@@ -1033,5 +1048,5 @@ module.exports = {
   getOpenPositions,
   setPartialSells, addPartialSell, removePartialSell, resetPartialSells,
   editPartialSell, disablePartialSell, enablePartialSell,
-  isBuyLocked, getBuyLockRemaining, setBuyLock, getBuyLockStatus,
+  isBuyLocked, getBuyLockRemaining, setBuyLock, getBuyLockStatus, setPostCloseLock,
 };

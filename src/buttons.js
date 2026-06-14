@@ -1083,9 +1083,11 @@ async function handleCloseRugs(chatId) {
           const result = await sellAll(pos.tokenMint, 'default', 500);
           const recovered = result.success ? (result.outputSol || solOut) : 0;
           positions.closePosition(pos.tokenMint, recovered, result.signature || 'none', 'rug_scan');
+          require('./autotrade').setPostCloseLock(pos.tokenMint);
           sold.push({ symbol: pos.symbol, recovered, source: 'position' });
         } catch {
           positions.closePosition(pos.tokenMint, 0, 'none', 'rug_scan');
+          require('./autotrade').setPostCloseLock(pos.tokenMint);
           sold.push({ symbol: pos.symbol, recovered: 0, source: 'position (sell failed)' });
         }
       } else {
@@ -1095,6 +1097,7 @@ async function handleCloseRugs(chatId) {
       const msg = e.message || '';
       if (msg.includes('NO_ROUTES_FOUND') || msg.includes('No routes found')) {
         positions.closePosition(pos.tokenMint, 0, 'none', 'rug_scan_dead');
+        require('./autotrade').setPostCloseLock(pos.tokenMint);
         sold.push({ symbol: pos.symbol, recovered: 0, source: 'position (dead)' });
       } else {
         errors.push({ symbol: pos.symbol, error: msg.slice(0, 60) });
@@ -1761,6 +1764,7 @@ async function handleSellButton(chatId, mintPrefix, pct) {
 
     if (pct >= 100) {
       const closed = dryRun.closeDryPosition(pos.tokenMint, virtualSol, 'button');
+      require('./autotrade').setPostCloseLock(pos.tokenMint);
       const emoji = closed.pnl >= 0 ? '🟢' : '🔴';
       await tgApi('sendMessage', {
         chat_id: chatId,
@@ -1791,6 +1795,7 @@ async function handleSellButton(chatId, mintPrefix, pct) {
     if (result.success) {
       if (pct >= 100) {
         positions.closePosition(pos.tokenMint, result.outputSol, result.signature, 'button');
+        require('./autotrade').setPostCloseLock(pos.tokenMint);
       } else {
         positions.recordPartialSell(pos.tokenMint, sellAmount, result.outputSol, result.signature, `button_${pct}pct`);
       }
