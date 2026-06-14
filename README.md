@@ -4,6 +4,75 @@ Solana token screener with automated trading, rug detection, bundler detection, 
 
 ---
 
+## Quick Start
+
+```bash
+# 1. Clone repository
+git clone https://github.com/kontia1/gmgn-screener.git
+cd gmgn-screener
+
+# 2. Install dependencies
+npm install
+
+# 3. Install gmgn-cli globally
+npm install -g gmgn-cli
+
+# 4. Configure gmgn-cli with your API key
+gmgn-cli config set api_key YOUR_GMGN_API_KEY
+
+# 5. Create .env from example
+cp .env.example .env
+# Edit .env with your credentials (see Environment Variables below)
+
+# 6. Import wallet via Telegram bot
+#    Send /wallet import <your_base58_private_key> to your bot
+
+# 7. Run
+node index.js
+```
+
+---
+
+## Running in Background
+
+### Option A: Screen (simple, no root)
+
+```bash
+# Start in detached screen session
+screen -dmS gmgn node index.js
+
+# View live output
+screen -r gmgn
+
+# Detach (leave running): Ctrl+A then D
+
+# Check if running
+screen -ls
+
+# Stop
+screen -S gmgn -X quit
+```
+
+### Option B: Systemd (auto-restart, auto-start on boot)
+
+```bash
+# Install systemd service
+sudo cp gmgn-screener.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable gmgn-screener
+sudo systemctl start gmgn-screener
+
+# Management
+sudo systemctl status gmgn-screener     # Check status
+sudo journalctl -u gmgn-screener -f     # View logs
+sudo systemctl restart gmgn-screener    # Restart
+sudo systemctl stop gmgn-screener       # Stop
+```
+
+**Auto-restart:** Service auto-restarts on crash (RestartSec=10) and starts on boot.
+
+---
+
 ## Features Overview
 
 ### 1. Triple-Source Token Screener
@@ -29,17 +98,34 @@ Each source has its own **seen list** (`gmgn-seen-trending.json`, `gmgn-seen-tre
 7. Dedup tracking prevents re-alerting the same token per source
 
 **Scoring System (0-100):**
+
+Scored positively:
 | Criteria | Weight | Description |
 |----------|--------|-------------|
-| PrePump | 25% | Early pump signals (volume spike, price consolidation) |
-| Consolidation | 20% | Price stability pattern |
-| Safety | 10% | Honeypot detection, contract safety |
-| Activity | 10% | Trading activity, buy/sell ratio |
-| Project | 10% | Website, Twitter, Telegram presence |
-| Momentum | 10% | Price momentum indicators |
-| Age | 5% | Token age (newer = higher score) |
-| Liquidity | 5% | Pool liquidity depth |
-| VolumeAccel | 5% | Volume acceleration signal |
+| Holders | 12 | Holder count (500+, 1000+) |
+| Smart Degens | 15 | Smart money wallets holding (5+, 10+) |
+| Volume | 12 | 24h volume (200K+, 500K+) |
+| Wash Trading | 3 | No wash trading detected |
+| Top 10 Holders | 5 | Top 10 holder rate (< 50%) |
+| Socials | 7 | Website + Twitter + Telegram presence |
+| CTO | 3 | Community Take Over status |
+| Liquidity | 4 | Pool liquidity (30K+, 50K+) |
+| Snipers | 3 | Sniper count (10-40 sweet spot) |
+
+Scored negatively (penalties):
+| Criteria | Penalty | Description |
+|----------|---------|-------------|
+| Wash trading | -25 | Wash trading detected |
+| No socials | -8 | No website, Twitter, or Telegram |
+| Top 10 > 50% | -10 | Extreme holder concentration |
+| Bundler | -15 | Bundled launch detected |
+| Entrapment > 15% | -10 | High entrapment ratio |
+| Snipers > 40 | -8 | Too many snipers |
+| Momentum overshoot | -10 | 1h > 500% (too late to enter) |
+| B/S < 0.8x | -5 | More sells than buys |
+| 1h drop > 20% | -4 | Significant price decline |
+
+Capped at 0-100.
 
 **Filter Modes:**
 
@@ -61,6 +147,8 @@ maxAge      — Maximum token age (minutes)
 minMC       — Minimum market cap ($0 = no filter)
 maxMC       — Maximum market cap ($0 = no filter)
 minVol      — Minimum 24h volume ($0 = no filter)
+minLiq      — Minimum liquidity ($0 = no filter)
+maxLiq      — Maximum liquidity ($0 = no filter)
 minBuyRatio — Minimum buy/sell ratio
 maxBundler  — Max bundler % (supply concentration)
 maxTop10    — Max top 10 holder % (supply concentration)
@@ -92,29 +180,31 @@ When enabled, shows detailed filter breakdown per scan:
 - Configurable buy amount (SOL)
 - Configurable slippage (bps)
 - Jupiter V6 API for best-route swap
+- **Global buy lock:** 300s cooldown per CA (source-agnostic, configurable)
+- **Re-check enabled** before autoBuy (race condition fix)
 
 **Auto Sell (Multi-Strategy Exit):**
 
 *Partial Sell Levels (configurable):*
 ```
-Lv1: Sell 50% at +15% PNL
+Lv1: Sell 40% at +15% PNL
 Lv2: Sell 25% at +30% PNL
 Lv3: Sell 25% at +50% PNL
 Remaining: exits via Trailing TP or Hard SL
 ```
 
 *Trailing Take Profit:*
-- Activates when peak PNL exceeds trigger threshold (default: +15%)
-- Sells when price drops from peak by configurable % (default: 5%)
-- Example: Token pumps to +40%, trailing activates, drops to +35% → sells
+- Activates when peak PNL exceeds trigger threshold (default: +13%)
+- Sells when price drops from peak by configurable % (default: 10%)
+- Example: Token pumps to +40%, trailing activates, drops to +30% → sells
 
 *2-Layer Stop Loss:*
 ```
-Soft SL: -15% → wait 15s for recovery
-  ├─ Price recovers above -15% → reset, continue holding
-  └─ Price stays below -15% after 15s → sell
+Soft SL: -20% → wait 15s for recovery
+  ├─ Price recovers above -20% → reset, continue holding
+  └─ Price stays below -20% after 15s → sell
 
-Hard SL: -25% → instant sell (no waiting)
+Hard SL: -35% → instant sell (no waiting)
 ```
 
 **Position Monitor:**
@@ -139,23 +229,11 @@ Hard SL: -25% → instant sell (no waiting)
 - Separate storage (`dry-run-positions.json`, `dry-run-closed.json`)
 - Toggle via Telegram menu (`/config` → Mode)
 - All button handlers support dry-run (buy, sell, refresh, positions)
+- Notifications prefixed with 🟡 DRY RUN or 🔴 LIVE
 
 **Wallet Empty Auto-Close:**
 - Monitors wallet balance during position check
 - If balance = 0 → auto-close all positions + notification
-
-**Position Display (via Telegram):**
-```
-🟢 TOKEN
-CA: 0x1234...5678
-💰 Spent: 0.0150 SOL
-📊 Now: 0.0225 SOL
-📈 PNL: +0.0075 SOL (+50.0%)
-🔝 Peak: +65.2%
-💧 Liq: $45K
-📊 MC: $180K
-[Bridge: Pump.fun]
-```
 
 ---
 
@@ -186,7 +264,7 @@ Detects **bundled token launches** where one entity controls multiple wallets to
 **3 Detection Rules:**
 | Rule | Threshold | Description |
 |------|-----------|-------------|
-| Rule 1 | ≥20 transfers from ≤2 payers | Classic bundle pattern |
+| Rule 1 | ≥20 transfers from ≤5 payers | Classic bundle pattern |
 | Rule 2 | ≥15 burst transfers in single block | Same-block bundle |
 | Rule 3 | ≥80% supply from ≤3 wallets | Extreme concentration |
 
@@ -194,32 +272,32 @@ Detects **bundled token launches** where one entity controls multiple wallets to
 - **ACTIVE bundler** — detected in last 15 seconds (block-level activity)
 - **HISTORICAL bundler** — detected previously but not currently active
 
-**Auto-Blacklist:** After **5x** bundler detection → auto-blacklist the wallet address.
+**Filter:** Rejects tokens with bundled launches. Uses Helius Enhanced Transactions API.
 
 **Cache:** 15-second cache per wallet to avoid redundant API calls.
 
-**Filter:** Tokens with `maxBundler%` above threshold are rejected. Default: < 25%.
-
 ---
 
-### 5. Rug Detection (Legacy)
+### 5. SmartMoney + KOL Tracker (4th + 5th Discovery Source)
 
-**Three types of rug notifications:**
+Discovers tokens via SmartMoney wallet activity and KOL (Key Opinion Leader) buys.
 
-**🚨 RUG WARNING — Massive Dump Detection**
-- Triggers when PNL drops below -90%
-- Early warning before SL triggers
-- Shows entry price, current value, PNL
+**SmartMoney Tracker:**
+- Monitors GMGN SmartMoney API for buy activity
+- Configurable: interval, min amount, side (buy/sell), min score
+- Shows wallet count + confidence level in alerts
+- Confidence: 1=Low, 2-3=Med, 4+=High
 
-**💀 RUG DETECTED — Token Dead**
-- Triggers when Jupiter returns NO_ROUTES_FOUND 3 consecutive times
-- Auto-closes position
-- Shows loss amount and reason
+**KOL Tracker:**
+- Monitors GMGN KOL API for buy activity
+- Same configurable parameters as SmartMoney
+- Confidence: 1=Low, 2=Med, 3+=High
 
-**💀 RUG Auto-Sell — SL Trigger with Severe Loss**
-- Triggers when SL fires but PNL is below -80%
-- Shows as "RUG" instead of normal "Auto-Sell"
-- Includes peak PNL and TX link
+**Key behavior:**
+- SM/KOL are **discovery sources**, NOT score boosters
+- Base score comes from `scoreToken()` (murni, no boost)
+- Per-source minScore: Trending 40, Signal 45, SM 50, KOL 55
+- All settings editable via `/tracker` command
 
 ---
 
@@ -286,26 +364,6 @@ GMGN market signals as a third token discovery layer, running alongside trending
 - One-click batch close
 - Supports both SPL Token and Token-2022 programs
 
-**Wallet Menu:**
-```
-💼 Wallet
-
-📍 abc123...xyz789
-💰 SOL: 0.5432
-
-🪙 Tokens (3):
-  • USDC: 1.50
-  • BRETT: 1000.00
-  • TOKEN: 500.00
-
-🗑️ Empty accounts: 15
-  (recoverable rent: ~0.030 SOL)
-
-[🗑️ Close 15 Empty Accounts]
-[💀 Close Rugs] [🔄 Refresh]
-[🔙 Back]
-```
-
 ---
 
 ### 8. PNL Tracking
@@ -341,6 +399,7 @@ GMGN market signals as a third token discovery layer, running alongside trending
 - Daily reset at **7:00 AM WIB** (00:00 UTC)
 - All-time PNL never resets
 - Open PNL calculated via Jupiter quotes
+- **Mode-dependent:** live mode shows live only, dry-run mode shows dry-run only
 
 ---
 
@@ -353,9 +412,9 @@ GMGN market signals as a third token discovery layer, running alongside trending
 📊 Positions: 3/5
 🤖 Auto-Trade: ✅ ON
 💰 Buy: 0.015 SOL | 🛑 SL: -25%
-📉 Trail: 5% | 📊 Score: 40
-
-🔍 Screener: Trending (Custom)
+📉 Trail: 10% | 📊 Score: 45
+🔍 Source: Signal (Custom)
+🔒 Buy Lock: 120s
 
 Select option:
 
@@ -366,16 +425,18 @@ Select option:
 
 **Commands:**
 ```
-/start    — Show main menu
-/menu     — Show main menu
-/buy <CA> — Buy token manually
+/start       — Show main menu
+/menu        — Show main menu
+/buy <CA>    — Buy token manually
 /sell <CA> [pct] — Sell token (default 100%)
-/sellall  — Sell all open positions
-/positions — Show open positions
-/pnl      — Show PNL summary
-/wallet   — Wallet management
-/config   — Show/edit config
-/help     — Show all commands
+/sellall     — Sell all open positions
+/positions   — Show open positions
+/pnl         — Show PNL summary
+/wallet      — Wallet management
+/config      — Show/edit config
+/tracker     — SmartMoney + KOL tracker settings
+/screen      — Run screener manually (one-shot)
+/help        — Show all commands
 ```
 
 **Inline Keyboard Navigation:**
@@ -393,65 +454,24 @@ Select option:
 
 ### 10. Config Management
 
-**Config Menu (via ⚙️ Config button):**
-```
-⚙️ Config
-
-🤖 Auto-Trade: ✅ ON
-💰 Buy: 0.015 SOL
-🛑 Soft SL: -15% (wait 15s)
-🛑 Hard SL: -25%
-📉 Trail: 5%
-🎯 Trigger: +15%
-📊 Score: 40
-📦 Max: 5
-⏱ Check: 10s
-🔍 Scan: 1m 30s
-📈 Slippage: 5%
-
-🎯 Partial Sells:
-  1. Sell 50% at +15%
-  2. Sell 25% at +30%
-  3. Sell 25% at +50%
-  → 0% trailing TP/SL
-
-🔍 Filter: Custom (Trending)
-  Age: 0-600m
-  MC: $300-$200K
-  Vol: $10K+
-  B/S: 1.3x+
-  Bundler: <30%
-  Top10: <85%
-  Min Holders: 60
-
-Tap button to edit value:
-
-[🤖 Auto: ON] [💰 Buy: 0.015]
-[🛑 Soft SL] [🛑 Hard SL]
-[📉 Trail: 5%] [🎯 Trigger: +15%]
-[📊 Score: 40] [📦 Max: 5]
-[⏱ Check: 10s] [🔍 Scan: 1m 30s]
-[📈 Slip: 5%] [🎯 Partial Sells]
-[🔍 Filter: Custom]
-[🔙 Back]
-```
-
 **Configurable Parameters:**
 
 | Parameter | Default | Range | Description |
 |-----------|---------|-------|-------------|
 | Auto-Trade | OFF | ON/OFF | Enable/disable auto trading |
-| Buy Amount | 0.05 SOL | 0.001-10 | SOL per buy |
-| Soft SL | -15% | -5 to -50 | Soft stop loss (wait for recovery) |
+| Mode | dry_run | live/dry_run | Trading mode |
+| Buy Amount | 1 SOL | 0.001-10 | SOL per buy |
+| Soft SL | -20% | -5 to -50 | Soft stop loss (wait for recovery) |
 | Soft SL Wait | 15s | 5-120 | Seconds to wait before soft SL sells |
-| Hard SL | -25% | -5 to -95 | Hard stop loss (instant sell) |
-| Trail Drop | 15% | 1-50 | Drop from peak to trigger trailing |
-| Trigger | +20% | +5 to +100 | Peak PNL to activate trailing |
-| Score | 60 | 10-100 | Min screener score to auto-buy |
-| Max Positions | 5 | 1-20 | Max concurrent positions |
-| Check Interval | 15s | 10-3600 | Position check frequency (seconds) |
-| Scan Interval | 60s | 10-3600 | Screener scan frequency (seconds) |
+| Hard SL | -35% | -5 to -95 | Hard stop loss (instant sell) |
+| Trail Drop | 10% | 1-50 | Drop from peak to trigger trailing |
+| Trigger | +13% | +5 to +100 | Peak PNL to activate trailing |
+| Score | 45 | 10-100 | Min screener score to auto-buy |
+| Max Positions | 5/10 | 1-20 | Max concurrent positions (live/dry) |
+| Check Interval | 10s | 10-3600 | Position check frequency (seconds) |
+| Scan Interval | 30s | 10-3600 | Screener scan frequency (seconds) |
 | Slippage | 500 bps | 10-5000 | Swap slippage tolerance |
+| Buy Lock | 120s | 0-600 | Cooldown per CA (source-agnostic) |
 
 **Partial Sells:**
 - 3 configurable levels
@@ -525,85 +545,18 @@ Formula: maxPos × delay ≤ checkInterval
 
 ---
 
-### 14. Systemd Service
+### 14. Analytics Logging
 
-**Installation:**
-```bash
-# Clone repository
-git clone https://github.com/kontia1/gmgn-screener.git
-cd gmgn-screener
+Tracks buy/reject decisions per source for performance analysis.
 
-# Install dependencies
-npm install
+**Logged data:**
+- Token symbol, address, source
+- Base score, min score threshold
+- Decision (buy/reject) + reason
+- Price, MC, age at time of decision
+- SmartMoney/KOL confidence + wallet count
 
-# Install gmgn-cli globally
-npm install -g gmgn-cli
-
-# Configure gmgn-cli
-gmgn-cli config set api_key YOUR_GMGN_API_KEY
-
-# Create .env from example
-cp .env.example .env
-# Edit .env with your credentials
-
-# Import wallet via Telegram bot
-# Send /wallet import <your_base58_private_key>
-
-# Install systemd service
-sudo cp gmgn-screener.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable gmgn-screener
-sudo systemctl start gmgn-screener
-```
-
-**Management:**
-```bash
-# Check status
-sudo systemctl status gmgn-screener
-
-# View logs
-sudo journalctl -u gmgn-screener -f
-
-# Restart
-sudo systemctl restart gmgn-screener
-
-# Stop
-sudo systemctl stop gmgn-screener
-```
-
-**Auto-restart:**
-- Service auto-restarts on crash (RestartSec=10)
-- Logs to journalctl
-- Starts on boot (if enabled)
-
----
-
-## Quick Start
-
-```bash
-# 1. Clone repository
-git clone https://github.com/kontia1/gmgn-screener.git
-cd gmgn-screener
-
-# 2. Install dependencies
-npm install
-
-# 3. Install gmgn-cli globally
-npm install -g gmgn-cli
-
-# 4. Configure gmgn-cli with your API key
-gmgn-cli config set api_key YOUR_GMGN_API_KEY
-
-# 5. Create .env from example
-cp .env.example .env
-# Edit .env with your values
-
-# 6. Import wallet via Telegram bot
-#    Send /wallet import <your_base58_private_key> to your bot
-
-# 7. Run
-node index.js
-```
+**Storage:** `data/analytics/decisions-YYYY-MM-DD.json` (7-day auto-cleanup)
 
 ---
 
@@ -640,10 +593,12 @@ gmgn-screener/
 │   ├── config.js         Config management
 │   ├── bundler-detector.js  Bundler detection (Helius API)
 │   ├── signal-scanner.js GMGN market signal scanner (3rd source)
+│   ├── smartmoney-tracker.js  SmartMoney + KOL tracker (4th+5th source)
 │   ├── dry-run.js        Dry-run storage (mirrors positions.js)
 │   ├── rug-detector.js   GMGN data comparison for rug signals
 │   ├── scorer.js         Multi-factor scoring (0-100)
 │   ├── filter.js         Token filtering logic
+│   ├── analytics.js      Decision logging (buy/reject per source)
 │   └── utils.js          Helpers (fmtMc, fmtVol, etc.)
 ├── commands/
 │   └── trade.js          Telegram commands
@@ -659,7 +614,8 @@ gmgn-screener/
 │   ├── closed.json       Closed positions
 │   ├── dry-run-positions.json  Dry-run open positions
 │   ├── dry-run-closed.json     Dry-run closed positions
-│   └── signal-config.json      Signal scanner config
+│   ├── signal-config.json      Signal scanner config
+│   └── analytics/        Decision logs (7-day auto-cleanup)
 ├── output/
 │   ├── gmgn-seen-trending.json   Seen tokens (trending source)
 │   ├── gmgn-seen-trenches.json   Seen tokens (trenches source)
