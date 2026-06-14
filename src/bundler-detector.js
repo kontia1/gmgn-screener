@@ -27,10 +27,13 @@ const HISTORY_FILE = path.join(__dirname, '..', 'data', 'bundler-history.json');
 
 // ─── History Management ─────────────────────────────────
 function loadHistory() {
+  const DEFAULT = { tokens: {}, wallets: {}, stats: {}, paginationAnalysis: {} };
   try {
-    return JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8'));
+    const data = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8'));
+    // Ensure all required keys exist (file may be {} from manual clear)
+    return { ...DEFAULT, ...data, tokens: data.tokens || {}, wallets: data.wallets || {} };
   } catch {
-    return { tokens: {}, wallets: {}, stats: {}, paginationAnalysis: {} };
+    return DEFAULT;
   }
 }
 
