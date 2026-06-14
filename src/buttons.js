@@ -127,6 +127,11 @@ const MENU = {
      { text: '⚙️ Settings', callback_data: 'menu_signal' }],
     [{ text: `⏱ Sig: ${cfg.signalScanner?.intervalSec ?? 30}s`, callback_data: 'cfg_signal_input_intervalSec' },
      { text: `💰 MC: ${fmtMc(cfg.signalScanner?.mcMin ?? 10000)}-${fmtMc(cfg.signalScanner?.mcMax ?? 500000)}`, callback_data: 'cfg_signal_mc' }],
+    // Trackers
+    [{ text: '📡 Trackers', callback_data: 'noop' }],
+    [{ text: `🧠 SM: ${cfg.smartmoneyTracker?.smartmoney?.enabled !== false ? '✅ ON' : '❌ OFF'}`, callback_data: 'tracker_toggle_sm' },
+     { text: `👑 KOL: ${cfg.kolTracker?.kol?.enabled !== false ? '✅ ON' : '❌ OFF'}`, callback_data: 'tracker_toggle_kol' }],
+    [{ text: '⚙️ Tracker Settings', callback_data: 'menu_tracker' }],
     [{ text: '🔙 Back', callback_data: 'menu_main' }],
   ],
 
