@@ -262,6 +262,10 @@ async function handleCallbackQuery(cq) {
   if (data === 'menu_config') return sendConfigMenu(chatId);
   if (data === 'menu_wallet') return sendWalletMenu(chatId);
   if (data === 'menu_screener') return sendScreenerMenu(chatId);
+  if (data === 'menu_tracker') {
+    const { routeCommand } = require('../commands/trade');
+    return routeCommand(chatId, '/tracker');
+  }
 
   // ── Screener source switch ──
   if (data === 'screener_source_trending' || data === 'screener_source_trenches' || data === 'screener_source_signal') {
@@ -271,6 +275,33 @@ async function handleCallbackQuery(cq) {
     return sendScreenerMenu(chatId);
   }
   if (data === 'menu_refresh') return sendMainMenu(chatId);
+
+  // ── Tracker Toggle ──
+  if (data === 'tracker_toggle_sm' || data === 'tracker_toggle_kol') {
+    const fs = require('fs');
+    const path = require('path');
+    const { DEFAULT_TRACKER_CONFIG } = require('../src/smartmoney-tracker');
+    const cfgFile = path.join(__dirname, '..', 'data', 'auto-config.json');
+    let cfg = {};
+    try { cfg = JSON.parse(fs.readFileSync(cfgFile, 'utf8')); } catch {}
+
+    const isSm = data === 'tracker_toggle_sm';
+    const cfgKey = isSm ? 'smartmoneyTracker' : 'kolTracker';
+    const trackerKey = isSm ? 'smartmoney' : 'kol';
+    const defaults = isSm ? DEFAULT_TRACKER_CONFIG.smartmoney : DEFAULT_TRACKER_CONFIG.kol;
+
+    if (!cfg[cfgKey]) cfg[cfgKey] = {};
+    if (!cfg[cfgKey][trackerKey]) cfg[cfgKey][trackerKey] = { ...defaults };
+
+    cfg[cfgKey][trackerKey].enabled = !cfg[cfgKey][trackerKey].enabled;
+
+    fs.writeFileSync(cfgFile, JSON.stringify(cfg, null, 2));
+
+    // Re-show tracker config
+    const { routeCommand } = require('../commands/trade');
+    await routeCommand(chatId, '/tracker');
+    return;
+  }
 
   // ── PNL Reset ──
   if (data === 'pnl_reset_live' || data === 'pnl_reset_dry') {

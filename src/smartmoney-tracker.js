@@ -39,14 +39,23 @@ function getTrackerConfig() {
   try {
     const cfgFile = path.join(__dirname, '..', 'data', 'auto-config.json');
     const cfg = JSON.parse(fs.readFileSync(cfgFile, 'utf8'));
-    const smCfg = cfg.smartmoneyTracker || {};
-    const kolCfg = cfg.kolTracker || {};
+    const smRaw = cfg.smartmoneyTracker?.smartmoney || cfg.smartmoneyTracker || {};
+    const kolRaw = cfg.kolTracker?.kol || cfg.kolTracker || {};
     return {
-      smartmoney: { ...DEFAULT_TRACKER_CONFIG.smartmoney, ...(smCfg.smartmoney || smCfg || {}) },
-      kol: { ...DEFAULT_TRACKER_CONFIG.kol, ...(kolCfg.kol || kolCfg || {}) },
+      smartmoney: {
+        ...DEFAULT_TRACKER_CONFIG.smartmoney,
+        ...smRaw,
+      },
+      kol: {
+        ...DEFAULT_TRACKER_CONFIG.kol,
+        ...kolRaw,
+      },
     };
   } catch {
-    return { ...DEFAULT_TRACKER_CONFIG };
+    return {
+      smartmoney: { ...DEFAULT_TRACKER_CONFIG.smartmoney },
+      kol: { ...DEFAULT_TRACKER_CONFIG.kol },
+    };
   }
 }
 

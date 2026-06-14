@@ -473,6 +473,126 @@ async function handlePnl(chatId) {
   });
 }
 
+// ─── /tracker — SmartMoney + KOL config ─────────────────
+async function handleTracker(chatId, args) {
+  const { getTrackerConfig, DEFAULT_TRACKER_CONFIG } = require('../src/smartmoney-tracker');
+
+  // Load current config from file
+  const fs = require('fs');
+  const path = require('path');
+  const cfgFile = path.join(__dirname, '..', 'data', 'auto-config.json');
+  let cfg = {};
+  try { cfg = JSON.parse(fs.readFileSync(cfgFile, 'utf8')); } catch {}
+
+  // Ensure tracker config sections exist
+  if (!cfg.smartmoneyTracker) cfg.smartmoneyTracker = { smartmoney: { ...DEFAULT_TRACKER_CONFIG.smartmoney } };
+  if (!cfg.kolTracker) cfg.kolTracker = { kol: { ...DEFAULT_TRACKER_CONFIG.kol } };
+  if (!cfg.smartmoneyTracker.smartmoney) cfg.smartmoneyTracker.smartmoney = { ...DEFAULT_TRACKER_CONFIG.smartmoney };
+  if (!cfg.kolTracker.kol) cfg.kolTracker.kol = { ...DEFAULT_TRACKER_CONFIG.kol };
+
+  const sm = cfg.smartmoneyTracker.smartmoney;
+  const kol = cfg.kolTracker.kol;
+
+  // No args → show current config
+  if (!args.length) {
+    const lines = [
+      `📡 <b>Tracker Config</b>`,
+      ``,
+      `🧠 <b>SmartMoney:</b>`,
+      `  Status: ${sm.enabled ? '✅ ON' : '❌ OFF'}`,
+      `  Interval: ${sm.intervalSec}s`,
+      `  Min Amount: $${sm.minAmountUsd}`,
+      `  Boost Score: +${sm.boostScore}`,
+      ``,
+      `👑 <b>KOL:</b>`,
+      `  Status: ${kol.enabled ? '✅ ON' : '❌ OFF'}`,
+      `  Interval: ${kol.intervalSec}s`,
+      `  Min Amount: $${kol.minAmountUsd}`,
+      `  Boost Score: +${kol.boostScore}`,
+      ``,
+      `<b>Commands:</b>`,
+      `/tracker sm|kol on|off`,
+      `/tracker sm|kol interval 60`,
+      `/tracker sm|kol amount 20`,
+      `/tracker sm|kol boost 15`,
+    ];
+    await tgApi('sendMessage', {
+      chat_id: chatId,
+      text: lines.join('\n'),
+      parse_mode: 'HTML',
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: `🧠 SM: ${sm.enabled ? '✅ ON' : '❌ OFF'}`, callback_data: 'tracker_toggle_sm' },
+           { text: `👑 KOL: ${kol.enabled ? '✅ ON' : '❌ OFF'}`, callback_data: 'tracker_toggle_kol' }],
+          [{ text: '🏠 Menu', callback_data: 'menu_main' }],
+        ]
+      }
+    });
+    return;
+  }
+
+  const sub = args[0]?.toLowerCase();  // sm or kol
+  const action = args[1]?.toLowerCase();
+
+  if (sub !== 'sm' && sub !== 'kol') {
+    await tgApi('sendMessage', { chat_id: chatId, text: '⚠️ Usage: /tracker sm|kol on|off|interval|amount|boost <value>', parse_mode: 'HTML' });
+    return;
+  }
+
+  const tracker = sub === 'sm' ? sm : kol;
+  const cfgKey = sub === 'sm' ? 'smartmoneyTracker' : 'kolTracker';
+  const trackerKey = sub === 'sm' ? 'smartmoney' : 'kol';
+  const label = sub === 'sm' ? 'SmartMoney' : 'KOL';
+
+  if (action === 'on' || action === 'off') {
+    tracker.enabled = action === 'on';
+  } else if (action === 'interval' && args[2]) {
+    const val = parseInt(args[2]);
+    if (isNaN(val) || val < 10) {
+      await tgApi('sendMessage', { chat_id: chatId, text: '⚠️ Min interval: 10s', parse_mode: 'HTML' });
+      return;
+    }
+    tracker.intervalSec = val;
+  } else if (action === 'amount' && args[2]) {
+    const val = parseFloat(args[2]);
+    if (isNaN(val) || val < 1) {
+      await tgApi('sendMessage', { chat_id: chatId, text: '⚠️ Min amount: $1', parse_mode: 'HTML' });
+      return;
+    }
+    tracker.minAmountUsd = val;
+  } else if (action === 'boost' && args[2]) {
+    const val = parseInt(args[2]);
+    if (isNaN(val) || val < 0 || val > 30) {
+      await tgApi('sendMessage', { chat_id: chatId, text: '⚠️ Boost range: 0-30', parse_mode: 'HTML' });
+      return;
+    }
+    tracker.boostScore = val;
+  } else {
+    await tgApi('sendMessage', { chat_id: chatId, text: '⚠️ Usage: /tracker sm|kol on|off|interval|amount|boost <value>', parse_mode: 'HTML' });
+    return;
+  }
+
+  // Save config
+  cfg[cfgKey][trackerKey] = { ...tracker };
+  const dir = path.dirname(cfgFile);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(cfgFile, JSON.stringify(cfg, null, 2));
+
+  const lines = [
+    `✅ <b>${label} updated:</b>`,
+    `  Status: ${tracker.enabled ? '✅ ON' : '❌ OFF'}`,
+    `  Interval: ${tracker.intervalSec}s`,
+    `  Min Amount: $${tracker.minAmountUsd}`,
+    `  Boost Score: +${tracker.boostScore}`,
+  ];
+  await tgApi('sendMessage', {
+    chat_id: chatId,
+    text: lines.join('\n'),
+    parse_mode: 'HTML',
+    reply_markup: { inline_keyboard: [[{ text: '📡 Tracker Config', callback_data: 'menu_tracker' }, { text: '🏠 Menu', callback_data: 'menu_main' }]] }
+  });
+}
+
 // ─── /remove — remove from screening list
 async function handleRemove(chatId, args) {
   if (!args[0]) {
@@ -699,6 +819,7 @@ async function routeCommand(chatId, text) {
     case '/pnl': return handlePnl(chatId);
     case '/remove': case '/delete': case '/del': return handleRemove(chatId, args);
     case '/config': return handleConfig(chatId, args);
+    case '/tracker': return handleTracker(chatId, args);
     default: return false;
   }
   return true;
