@@ -190,15 +190,13 @@ class TelegramNotifier {
   }
 
   _formatNumber(n) {
-    if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
-    if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
-    if (n >= 1e3) return (n / 1e3).toFixed(2) + 'K';
-    return n.toFixed(2);
+    if (!n || n <= 0) return '0';
+    return Math.round(n).toLocaleString('en-US');
   }
 
   _formatUsd(n) {
-    if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
-    if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+    if (!n || n <= 0) return '0';
+    return Math.round(n).toLocaleString('en-US');
     return n.toFixed(0);
   }
 

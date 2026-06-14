@@ -154,8 +154,27 @@ async function checkBundlerPattern(tokenMint, tokenSupply = 0, symbol = 'Unknown
       return { isBundler: false, hasHistory: false, details: 'No transactions', transfers: 0, uniquePayers: 0 };
     }
 
-    // Filter transfers only
-    const transfers = txs.filter(tx => tx.type === 'TRANSFER');
+    // Filter transactions that contain actual TOKEN transfers (movement between wallets)
+    // Helius returns tokenTransfers[] for many tx types, but not all are real transfers
+    // Must have: non-SOL mint, non-zero amount, BOTH from and to accounts populated
+    const VALID_TX_TYPES = new Set(['TRANSFER', 'SWAP', 'COMPRESSED_NFT_TRANSFER']);
+    const transfers = txs.filter(tx => {
+      // Check tokenTransfers[] for actual wallet-to-wallet token movements
+      const tokenTx = (tx.tokenTransfers || []).filter(t => 
+        t.mint && 
+        t.mint !== 'So11111111111111111111111111111111111111112' &&
+        t.fromUserAccount && t.toUserAccount && // Both sides must exist (actual transfer)
+        Math.abs(t.tokenAmount || 0) > 0         // Non-zero amount
+      );
+      if (tokenTx.length > 0) return true;
+      // Fallback: TRANSFER type with non-SOL description (legacy)
+      if (VALID_TX_TYPES.has(tx.type)) {
+        const desc = tx.description || '';
+        if (desc.includes(' SOL ') || desc.includes(' SOL.')) return false;
+        if (desc.match(/transferred [\d,.]+\s/)) return true;
+      }
+      return false;
+    });
     if (transfers.length === 0) {
       return { isBundler: false, hasHistory: false, details: 'No transfers', transfers: 0, uniquePayers: 0 };
     }
@@ -173,9 +192,14 @@ async function checkBundlerPattern(tokenMint, tokenSupply = 0, symbol = 'Unknown
       const newest = transfers[0].timestamp || 0;
       const spanSeconds = newest - oldest;
       
-      if (spanSeconds < 60) {
+      // Count unique payers for 50-tx burst
+      const burstPayers = new Set(transfers.map(tx => tx.feePayer || ''));
+      
+      // Only flag if few payers (real bundler = 1-3 wallets doing many transfers)
+      // 10+ payers = organic launch rush, not bundler
+      if (spanSeconds < 60 && burstPayers.size <= 5) {
         isBundler = true;
-        reasons.push(`50 transactions in ${spanSeconds} seconds`);
+        reasons.push(`50 transactions in ${spanSeconds} seconds from ${burstPayers.size} payers`);
         burstPosition = 'first_50';
         wouldPaginationHelp = false;
       }
@@ -207,21 +231,14 @@ async function checkBundlerPattern(tokenMint, tokenSupply = 0, symbol = 'Unknown
         activePayers.add(payer);
         if (!payerWallets.includes(payer)) payerWallets.push(payer);
         
-        const desc = tx.description || '';
-        
-        // Skip SOL transfers (only count token transfers)
-        if (desc.includes(' SOL ') || desc.includes(' SOL.')) continue;
-        
-        const match = desc.match(/transferred ([\d,.]+)\s/);
-        if (match) {
-          const amt = parseFloat(match[1].replace(/,/g, ''));
-          // Skip zero-amount transfers
+        // Use tokenTransfers[] for accurate token counting (not description parsing)
+        const tokenTx = (tx.tokenTransfers || []).filter(t => t.mint && t.mint !== 'So11111111111111111111111111111111111111112');
+        for (const t of tokenTx) {
+          const amt = Math.abs(t.tokenAmount || 0);
           if (amt <= 0) continue;
-          
           activeTokens += amt;
-          const recipientMatch = desc.match(/transferred [\d,.]+\s+\w+\s+to\s+(\w+)/);
-          if (recipientMatch) {
-            const recipient = recipientMatch[1];
+          const recipient = t.toUserAccount || '';
+          if (recipient) {
             recipientCounts[recipient] = (recipientCounts[recipient] || 0) + amt;
           }
         }

@@ -283,7 +283,7 @@ async function runTrackerScan(type, processToken) {
       // Skip tokens with no MC or liquidity after enrichment
       const mc = token.market_cap || token.fdv || 0;
       if (mc <= 0 || (token.liquidity || 0) <= 0) {
-        seen[addr] = { ts: Date.now() };
+        seen[addr] = { ts: Date.now(), wallets: group.wallets.size };
         continue;
       }
 
@@ -295,7 +295,7 @@ async function runTrackerScan(type, processToken) {
       try {
         // Double-check global dedup right before processing (race condition fix)
         if (checkGlobalDedup(addr)) {
-          seen[addr] = { ts: Date.now() };
+          seen[addr] = { ts: Date.now(), wallets: group.wallets.size };
           saveSeen(seenFile, seen);
           continue;
         }
@@ -305,7 +305,7 @@ async function runTrackerScan(type, processToken) {
         console.error(`[TRACKER/${type}] Process ${token.symbol} failed: ${e.message}`);
       }
 
-      seen[addr] = { ts: Date.now() };
+      seen[addr] = { ts: Date.now(), wallets: group.wallets.size };
       setGlobalDedup(addr, type);  // shared with signal scanner
       saveSeen(seenFile, seen);  // save after each token (persist on restart)
     }

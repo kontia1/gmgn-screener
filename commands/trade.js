@@ -495,26 +495,15 @@ async function handleTracker(chatId, args) {
 
   // No args → show current config
   if (!args.length) {
+    const smMinScore = sm.minScore || 50;
+    const kolMinScore = kol.minScore || 55;
     const lines = [
       `📡 <b>Tracker Config</b>`,
       ``,
-      `🧠 <b>SmartMoney:</b>`,
-      `  Status: ${sm.enabled ? '✅ ON' : '❌ OFF'}`,
-      `  Interval: ${sm.intervalSec}s`,
-      `  Min Amount: $${sm.minAmountUsd}`,
-      `  Boost Score: +${sm.boostScore}`,
+      `🧠 <b>SmartMoney:</b> ${sm.enabled ? '✅ ON' : '❌ OFF'} | ${sm.intervalSec}s | $${sm.minAmountUsd} | Score: ${smMinScore}`,
+      `👑 <b>KOL:</b> ${kol.enabled ? '✅ ON' : '❌ OFF'} | ${kol.intervalSec}s | $${kol.minAmountUsd} | Score: ${kolMinScore}`,
       ``,
-      `👑 <b>KOL:</b>`,
-      `  Status: ${kol.enabled ? '✅ ON' : '❌ OFF'}`,
-      `  Interval: ${kol.intervalSec}s`,
-      `  Min Amount: $${kol.minAmountUsd}`,
-      `  Boost Score: +${kol.boostScore}`,
-      ``,
-      `<b>Commands:</b>`,
-      `/tracker sm|kol on|off`,
-      `/tracker sm|kol interval 60`,
-      `/tracker sm|kol amount 20`,
-      `/tracker sm|kol boost 15`,
+      `<i>Klik tombol di bawah untuk edit</i>`,
     ];
     await tgApi('sendMessage', {
       chat_id: chatId,
@@ -522,9 +511,9 @@ async function handleTracker(chatId, args) {
       parse_mode: 'HTML',
       reply_markup: {
         inline_keyboard: [
-          [{ text: `🧠 SM: ${sm.enabled ? '✅ ON' : '❌ OFF'}`, callback_data: 'tracker_toggle_sm' },
-           { text: `👑 KOL: ${kol.enabled ? '✅ ON' : '❌ OFF'}`, callback_data: 'tracker_toggle_kol' }],
-          [{ text: '🏠 Menu', callback_data: 'menu_main' }],
+          [{ text: `🧠 SM Settings`, callback_data: 'tracker_edit_sm' },
+           { text: `👑 KOL Settings`, callback_data: 'tracker_edit_kol' }],
+          [{ text: '⬅️ Config', callback_data: 'menu_config' }],
         ]
       }
     });
@@ -535,7 +524,7 @@ async function handleTracker(chatId, args) {
   const action = args[1]?.toLowerCase();
 
   if (sub !== 'sm' && sub !== 'kol') {
-    await tgApi('sendMessage', { chat_id: chatId, text: '⚠️ Usage: /tracker sm|kol on|off|interval|amount|boost <value>', parse_mode: 'HTML' });
+    await tgApi('sendMessage', { chat_id: chatId, text: '⚠️ Usage: /tracker sm|kol on|off|interval|amount|minscore <value>', parse_mode: 'HTML' });
     return;
   }
 
@@ -560,15 +549,15 @@ async function handleTracker(chatId, args) {
       return;
     }
     tracker.minAmountUsd = val;
-  } else if (action === 'boost' && args[2]) {
+  } else if (action === 'minscore' && args[2]) {
     const val = parseInt(args[2]);
-    if (isNaN(val) || val < 0 || val > 30) {
-      await tgApi('sendMessage', { chat_id: chatId, text: '⚠️ Boost range: 0-30', parse_mode: 'HTML' });
+    if (isNaN(val) || val < 10 || val > 100) {
+      await tgApi('sendMessage', { chat_id: chatId, text: '⚠️ Min score range: 10-100', parse_mode: 'HTML' });
       return;
     }
-    tracker.boostScore = val;
+    tracker.minScore = val;
   } else {
-    await tgApi('sendMessage', { chat_id: chatId, text: '⚠️ Usage: /tracker sm|kol on|off|interval|amount|boost <value>', parse_mode: 'HTML' });
+    await tgApi('sendMessage', { chat_id: chatId, text: '⚠️ Usage: /tracker sm|kol on|off|interval|amount|minscore <value>', parse_mode: 'HTML' });
     return;
   }
 
@@ -589,7 +578,7 @@ async function handleTracker(chatId, args) {
     chat_id: chatId,
     text: lines.join('\n'),
     parse_mode: 'HTML',
-    reply_markup: { inline_keyboard: [[{ text: '📡 Tracker Config', callback_data: 'menu_tracker' }, { text: '🏠 Menu', callback_data: 'menu_main' }]] }
+    reply_markup: { inline_keyboard: [[{ text: '📡 Tracker Config', callback_data: 'menu_tracker' }, { text: '⬅️ Config', callback_data: 'menu_config' }]] }
   });
 }
 

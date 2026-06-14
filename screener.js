@@ -13,6 +13,45 @@ const path = require('path');
 const SEEN_DIR = path.join(__dirname, 'output');
 const getSeenFile = (source) => path.join(SEEN_DIR, `gmgn-seen-${source || 'trending'}.json`);
 
+// Check if token was bought by SM/KOL wallets
+function getTrackerStatus(address) {
+  const result = { sm: false, kol: false, smWallets: 0, kolWallets: 0 };
+  try {
+    const smFile = path.join(SEEN_DIR, 'gmgn-seen-sm.json');
+    if (fs.existsSync(smFile)) {
+      const smData = JSON.parse(fs.readFileSync(smFile, 'utf8'));
+      if (smData[address]) {
+        result.sm = true;
+        result.smWallets = smData[address].wallets || 1;
+      }
+    }
+  } catch {}
+  try {
+    const kolFile = path.join(SEEN_DIR, 'gmgn-seen-kol.json');
+    if (fs.existsSync(kolFile)) {
+      const kolData = JSON.parse(fs.readFileSync(kolFile, 'utf8'));
+      if (kolData[address]) {
+        result.kol = true;
+        result.kolWallets = kolData[address].wallets || 1;
+      }
+    }
+  } catch {}
+  return result;
+}
+
+// Get confidence level from wallet count
+function getConfidence(source, wallets) {
+  if (source === 'smartmoney' || source === 'sm') {
+    if (wallets >= 4) return 'High';
+    if (wallets >= 2) return 'Medium';
+    return 'Low';
+  } else {
+    if (wallets >= 3) return 'High';
+    if (wallets >= 2) return 'Medium';
+    return 'Low';
+  }
+}
+
 // Default hard-coded filters (NEVER change)
 const DEFAULT_FILTERS = {
   // ── Existing ──
@@ -69,59 +108,77 @@ function hasSocial(t) { return !!(t.twitter_username || t.website || t.telegram 
 function scoreToken(t, ageMin) {
   let score = 0; const r = [];
   const h = t.holder_count || 0;
-  if (h >= 500) { score += 15; r.push(`${h} holders`); }
-  else if (h >= 200) { score += 12; r.push(`${h} holders`); }
-  else if (h >= 100) { score += 8; r.push(`${h} holders`); }
-  else { score += 4; r.push(`${h} holders`); }
+  if (h >= 500) { score += 12; r.push(`${h} holders`); }
+  else if (h >= 200) { score += 9; r.push(`${h} holders`); }
+  else if (h >= 100) { score += 6; r.push(`${h} holders`); }
+  else if (h >= 30) { score += 3; r.push(`${h} holders`); }
+  else { score += 1; r.push(`⚠️ ${h} holders`); }
 
-  const smart = t.smart_degen_count || t.bot_degen_count || 0;
-  if (smart >= 5) { score += 15; r.push(`${smart} smart degens`); }
-  else if (smart >= 2) { score += 10; r.push(`${smart} smart degens`); }
-  else if (smart >= 1) { score += 5; r.push(`${smart} smart degen`); }
+  const smart = t.smart_degen_count || 0;
+  if (smart >= 5) { score += 12; r.push(`${smart} smart degens`); }
+  else if (smart >= 2) { score += 8; r.push(`${smart} smart degens`); }
+  else if (smart >= 1) { score += 4; r.push(`${smart} smart degen`); }
 
   const vol = t.volume_24h || t.volume || 0;
-  if (vol >= 200000) { score += 15; r.push(`$${(vol/1e3).toFixed(0)}K vol`); }
-  else if (vol >= 50000) { score += 10; r.push(`$${(vol/1e3).toFixed(0)}K vol`); }
-  else if (vol >= 10000) { score += 5; r.push(`$${(vol/1e3).toFixed(0)}K vol`); }
+  if (vol >= 200000) { score += 12; r.push(`$${Math.round(vol).toLocaleString()} vol`); }
+  else if (vol >= 50000) { score += 8; r.push(`$${Math.round(vol).toLocaleString()} vol`); }
+  else if (vol >= 10000) { score += 4; r.push(`$${Math.round(vol).toLocaleString()} vol`); }
+  else if (vol >= 3000) { score += 2; r.push(`$${Math.round(vol).toLocaleString()} vol`); }
 
   const buys = t.buys_24h || t.buys || 0;
   const sells = t.sells_24h || t.sells || 0;
   if (sells > 0) {
     const ratio = buys / sells;
-    if (ratio >= 2.5) { score += 15; r.push(`B/S ${ratio.toFixed(1)}x`); }
-    else if (ratio >= 1.8) { score += 10; r.push(`B/S ${ratio.toFixed(1)}x`); }
-    else if (ratio >= 1.2) { score += 5; r.push(`B/S ${ratio.toFixed(1)}x`); }
+    if (ratio >= 3.0) { score += 12; r.push(`B/S ${ratio.toFixed(1)}x`); }
+    else if (ratio >= 2.0) { score += 8; r.push(`B/S ${ratio.toFixed(1)}x`); }
+    else if (ratio >= 1.5) { score += 4; r.push(`B/S ${ratio.toFixed(1)}x`); }
+    else if (ratio < 0.8) { score -= 3; r.push(`⚠️ B/S ${ratio.toFixed(1)}x`); }
   }
 
   const bundler = t.bundler_rate || t.bundler_trader_amount_rate || 0;
-  if (bundler < 0.1) { score += 5; r.push('low bundler'); }
-  if (!t.is_wash_trading) { score += 5; r.push('no wash'); }
-  const top10 = t.top_10_holder_rate || 0;
-  if (top10 < 0.8) { score += 5; r.push(`top10 ${(top10*100).toFixed(0)}%`); }
-  else if (top10 >= 0.9) { score -= 5; r.push(`⚠️ top10 ${(top10*100).toFixed(0)}%`); }
+  if (bundler < 0.05) { score += 4; r.push('low bundler'); }
+  else if (bundler < 0.1) { score += 2; r.push('ok bundler'); }
+  else if (bundler >= 0.25) { score -= 3; r.push(`⚠️ bundler ${(bundler*100).toFixed(0)}%`); }
 
-  if (hasSocial(t)) { score += 10; r.push('has socials'); }
-  if (t.renounced_mint && t.renounced_freeze_account) { score += 5; r.push('renounced'); }
-  if (t.cto_flag) { score += 5; r.push('CTO'); }
-  if (ageMin >= 20 && ageMin <= 60) { score += 5; r.push('sweet spot age'); }
+  if (!t.is_wash_trading) { score += 3; r.push('no wash'); }
+  else { score -= 5; r.push('⚠️ wash trading'); }
+
+  const top10 = t.top_10_holder_rate || 0;
+  if (top10 < 0.5) { score += 5; r.push(`top10 ${(top10*100).toFixed(0)}%`); }
+  else if (top10 < 0.7) { score += 3; r.push(`top10 ${(top10*100).toFixed(0)}%`); }
+  else if (top10 < 0.85) { score += 1; r.push(`top10 ${(top10*100).toFixed(0)}%`); }
+  else { score -= 5; r.push(`⚠️ top10 ${(top10*100).toFixed(0)}%`); }
+
+  if (hasSocial(t)) { score += 7; r.push('has socials'); }
+  else { score -= 3; r.push('no socials'); }
+
+  if (t.renounced_mint && t.renounced_freeze_account) { score += 4; r.push('renounced'); }
+  if (t.cto_flag) { score += 3; r.push('CTO'); }
+  if (ageMin >= 20 && ageMin <= 60) { score += 3; r.push('sweet spot age'); }
 
   // Pre-pump signal bonuses
   const liq = t.liquidity || 0;
-  if (liq >= 20000) { score += 5; r.push(`$${(liq/1000).toFixed(0)}K liq`); }
-  else if (liq >= 10000) { score += 3; r.push(`$${(liq/1000).toFixed(0)}K liq`); }
+  if (liq >= 30000) { score += 4; r.push(`$${Math.round(liq).toLocaleString()} liq`); }
+  else if (liq >= 15000) { score += 2; r.push(`$${Math.round(liq).toLocaleString()} liq`); }
 
   const entrap = t.entrapment_ratio || 0;
-  if (entrap < 0.03) { score += 3; r.push('low entrapment'); }
+  if (entrap >= 0.15) { score -= 5; r.push(`⚠️ entrap ${(entrap*100).toFixed(0)}%`); }
+  else if (entrap < 0.03) { score += 3; r.push('low entrapment'); }
 
   const sniper = t.sniper_count || 0;
   if (sniper >= 10 && sniper <= 40) { score += 3; r.push(`${sniper} snipers`); }
+  else if (sniper > 60) { score -= 3; r.push(`⚠️ ${sniper} snipers`); }
 
   const p5m = t.price_change_percent5m || 0;
   if (p5m >= 5 && p5m <= 30) { score += 3; r.push(`5m +${p5m.toFixed(0)}%`); }
+  else if (p5m > 100) { score -= 3; r.push(`⚠️ 5m +${p5m.toFixed(0)}%`); }
 
   const p1h = t.price_change_percent1h || 0;
   if (p1h > 0 && p1h < 150) { score += 2; r.push(`1h +${p1h.toFixed(0)}%`); }
-  return { score: Math.max(0, score), reasons: r };
+  else if (p1h >= 500) { score -= 3; r.push(`⚠️ 1h +${p1h.toFixed(0)}%`); }
+  else if (p1h < -20) { score -= 4; r.push(`⚠️ 1h ${p1h.toFixed(0)}%`); }
+
+  return { score: Math.min(100, Math.max(0, score)), reasons: r };
 }
 
 function formatAlert(t, score, reasons) {
@@ -168,9 +225,26 @@ function formatAlert(t, score, reasons) {
     `Smart Degens: ${smartDegen}`,
     `Snipers: ${sniperCount}`,
     `Hot Level: ${hotLevel}/3`,
-    ``,
-    `🔗 <a href="https://gmgn.ai/sol/token/${t.address}">GMGN</a>`,
   ];
+
+  // SM/KOL tracker status
+  const tracker = getTrackerStatus(t.address);
+  if (tracker.sm || tracker.kol) {
+    lines.push(``);
+    lines.push(`📡 <b>Tracker</b>`);
+    if (tracker.sm) {
+      const smConf = getConfidence('sm', tracker.smWallets);
+      lines.push(`🧠 SmartMoney: ${smConf} (${tracker.smWallets} wallet${tracker.smWallets > 1 ? 's' : ''})`);
+    }
+    if (tracker.kol) {
+      const kolConf = getConfidence('kol', tracker.kolWallets);
+      lines.push(`👑 KOL: ${kolConf} (${tracker.kolWallets} wallet${tracker.kolWallets > 1 ? 's' : ''})`);
+    }
+  }
+
+  lines.push(``,
+    `🔗 <a href="https://gmgn.ai/sol/token/${t.address}">GMGN</a>`,
+  );
   if (t.twitter_username && !t.twitter_username.includes('http'))
     lines.push(`🐦 <a href="https://x.com/${t.twitter_username}">Twitter</a>`);
   if (t.website && t.website.startsWith('http'))
@@ -248,7 +322,7 @@ async function runScan() {
     const pChange1h = t.price_change_percent1h || 0;
 
     // Debug: log every token's raw data
-    console.log(`  [D] ${t.symbol || '?'} | age:${ageMin.toFixed(0)}m mc:$${(mc/1000).toFixed(0)}K vol:$${(vol/1000).toFixed(1)}K liq:$${(liq/1000).toFixed(1)}K wash:${isWash} bundler:${(bundler*100).toFixed(0)}% top10:${(top10*100).toFixed(0)}% B/S:${bsRatio.toFixed(1)} smart:${smartDegen} sniper:${sniperCount} entrap:${(entrapment*100).toFixed(1)}% hot:${hotLevel} 5m:${pChange5m.toFixed(1)}% 1h:${pChange1h.toFixed(0)}% seen:${!!seen[addr]}`);
+    console.log(`  [D] ${t.symbol || '?'} | age:${ageMin.toFixed(0)}m mc:$${Math.round(mc)} vol:$${Math.round(vol)} liq:$${Math.round(liq)} wash:${isWash} bundler:${(bundler*100).toFixed(0)}% top10:${(top10*100).toFixed(0)}% B/S:${bsRatio.toFixed(1)} smart:${smartDegen} sniper:${sniperCount} entrap:${(entrapment*100).toFixed(1)}% hot:${hotLevel} 5m:${pChange5m.toFixed(1)}% 1h:${pChange1h.toFixed(0)}% seen:${!!seen[addr]}`);
 
     // ── Existing filters ──
     if (ageMin < CONFIG.minAgeMin || ageMin > CONFIG.maxAgeMin) { stats.age++; continue; }
@@ -401,4 +475,4 @@ const SIGNAL_NAMES = {
   18: 'Rug Warning',
 };
 
-module.exports = { runScan, loadSeen, getSeenFile, scoreToken, SIGNAL_NAMES, DEFAULT_FILTERS };
+module.exports = { runScan, loadSeen, getSeenFile, scoreToken, SIGNAL_NAMES, DEFAULT_FILTERS, getTrackerStatus, getConfidence };

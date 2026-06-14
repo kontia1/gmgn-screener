@@ -17,16 +17,12 @@ const pendingInputs = new Map(); // chatId → { configKey, label, current }
 // ─── Format helpers (shared across all menus) ───────────
 function fmtMc(v) {
   if (!v || v <= 0) return '?';
-  if (v >= 1e6) return `$${(v / 1e6).toFixed(1)}M`;
-  if (v >= 1e3) return `$${(v / 1e3).toFixed(0)}K`;
-  return `$${v.toFixed(0)}`;
+  return `$${Math.round(v).toLocaleString('en-US')}`;
 }
 
 function fmtVol(v) {
   if (!v || v <= 0) return '$0';
-  if (v >= 1e6) return `$${(v / 1e6).toFixed(1)}M`;
-  if (v >= 1e3) return `$${(v / 1e3).toFixed(0)}K`;
-  return `$${v.toFixed(0)}`;
+  return `$${Math.round(v).toLocaleString('en-US')}`;
 }
 
 function isPendingInput(chatId) {
@@ -120,7 +116,15 @@ const MENU = {
        { text: `📊 1h: <${cfg.customFilters?.maxPriceChange1h ?? 150}%`, callback_data: 'cfg_filter_maxPriceChange1h' }],
       [{ text: `🔥 Hot: ${cfg.customFilters?.minHotLevel ?? 1}+`, callback_data: 'cfg_filter_minHotLevel' },
        { text: `👀 Visits: ${cfg.customFilters?.minVisitingCount ?? 20}+`, callback_data: 'cfg_filter_minVisitingCount' }],
-    ] : []),
+    ] : [
+      // Default mode — show active (hard-coded) filters
+      [{ text: `⏳ Age: 15-120m`, callback_data: 'noop' },
+       { text: `💰 MC: $20K-$500K`, callback_data: 'noop' }],
+      [{ text: `📊 Vol: $10K+`, callback_data: 'noop' },
+       { text: `💧 Liq: $8K+`, callback_data: 'noop' }],
+      [{ text: `🤝 B/S: 1.2x+`, callback_data: 'noop' },
+       { text: `🤖 Bundler: <30%`, callback_data: 'noop' }],
+    ]),
     // Signal Scanner
     [{ text: '📡 Signal Scanner', callback_data: 'noop' }],
     [{ text: cfg.signalScanner?.enabled !== false ? '✅ Signal ON' : '❌ Signal OFF', callback_data: 'cfg_signal_toggle' },
@@ -129,9 +133,12 @@ const MENU = {
      { text: `💰 MC: ${fmtMc(cfg.signalScanner?.mcMin ?? 10000)}-${fmtMc(cfg.signalScanner?.mcMax ?? 500000)}`, callback_data: 'cfg_signal_mc' }],
     // Trackers
     [{ text: '📡 Trackers', callback_data: 'noop' }],
-    [{ text: `🧠 SM: ${cfg.smartmoneyTracker?.smartmoney?.enabled !== false ? '✅ ON' : '❌ OFF'}`, callback_data: 'tracker_toggle_sm' },
-     { text: `👑 KOL: ${cfg.kolTracker?.kol?.enabled !== false ? '✅ ON' : '❌ OFF'}`, callback_data: 'tracker_toggle_kol' }],
-    [{ text: '⚙️ Tracker Settings', callback_data: 'menu_tracker' }],
+    [{ text: `🧠 SM: ${cfg.smartmoneyTracker?.smartmoney?.enabled !== false ? '✅ ON' : '❌ OFF'}`, callback_data: 'tracker_edit_sm' },
+     { text: `👑 KOL: ${cfg.kolTracker?.kol?.enabled !== false ? '✅ ON' : '❌ OFF'}`, callback_data: 'tracker_edit_kol' }],
+    // Buy Lock
+    [{ text: '🔒 Buy Lock', callback_data: 'noop' }],
+    [{ text: `${cfg.buyLock?.enabled !== false ? '✅ Lock ON' : '❌ Lock OFF'}`, callback_data: 'cfg_buylock_toggle' },
+     { text: `⏱ ${cfg.buyLock?.ttlSec || 300}s`, callback_data: 'cfg_buylock_ttl' }],
     [{ text: '🔙 Back', callback_data: 'menu_main' }],
   ],
 
@@ -283,28 +290,131 @@ async function handleCallbackQuery(cq) {
 
   // ── Tracker Toggle ──
   if (data === 'tracker_toggle_sm' || data === 'tracker_toggle_kol') {
-    const fs = require('fs');
-    const path = require('path');
+    const { updateAutoConfig, getAutoConfig } = require('../src/autotrade');
     const { DEFAULT_TRACKER_CONFIG } = require('../src/smartmoney-tracker');
-    const cfgFile = path.join(__dirname, '..', 'data', 'auto-config.json');
-    let cfg = {};
-    try { cfg = JSON.parse(fs.readFileSync(cfgFile, 'utf8')); } catch {}
 
     const isSm = data === 'tracker_toggle_sm';
     const cfgKey = isSm ? 'smartmoneyTracker' : 'kolTracker';
     const trackerKey = isSm ? 'smartmoney' : 'kol';
     const defaults = isSm ? DEFAULT_TRACKER_CONFIG.smartmoney : DEFAULT_TRACKER_CONFIG.kol;
 
+    const cfg = getAutoConfig();
     if (!cfg[cfgKey]) cfg[cfgKey] = {};
     if (!cfg[cfgKey][trackerKey]) cfg[cfgKey][trackerKey] = { ...defaults };
 
-    cfg[cfgKey][trackerKey].enabled = !cfg[cfgKey][trackerKey].enabled;
+    const newEnabled = !cfg[cfgKey][trackerKey].enabled;
+    updateAutoConfig({ [cfgKey]: { ...cfg[cfgKey], [trackerKey]: { ...cfg[cfgKey][trackerKey], enabled: newEnabled } } });
 
-    fs.writeFileSync(cfgFile, JSON.stringify(cfg, null, 2));
+    // Re-read after save to ensure correct state
+    const updated = getAutoConfig();
+    const t = updated[cfgKey][trackerKey];
+    const icon = isSm ? '🧠' : '👑';
+    const label = isSm ? 'SmartMoney' : 'KOL';
+    const prefix = isSm ? 'sm' : 'kol';
+    const minScoreDefault = isSm ? 50 : 55;
 
-    // Re-show tracker config
-    const { routeCommand } = require('../commands/trade');
-    await routeCommand(chatId, '/tracker');
+    const lines = [
+      `${icon} <b>${label} Settings</b>`,
+      ``,
+      `Status: ${t.enabled ? '✅ ON' : '❌ OFF'}`,
+      `Interval: ${t.intervalSec}s`,
+      `Min Amount: $${t.minAmountUsd}`,
+      `Min Score: ${t.minScore || minScoreDefault}`,
+    ];
+
+    await tgApi('editMessageText', {
+      chat_id: chatId,
+      message_id: msgId,
+      text: lines.join('\n'),
+      parse_mode: 'HTML',
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: `${t.enabled ? '🔴 OFF' : '🟢 ON'}`, callback_data: `tracker_toggle_${prefix}` },
+           { text: `⏱ ${t.intervalSec}s`, callback_data: `tracker_ask_interval_${prefix}` },
+           { text: `💰 $${t.minAmountUsd}`, callback_data: `tracker_ask_amount_${prefix}` }],
+          [{ text: `📊 Min Score: ${t.minScore || minScoreDefault}`, callback_data: `tracker_ask_minscore_${prefix}` }],
+          [{ text: '⬅️ Config', callback_data: 'menu_config' }],
+        ]
+      }
+    });
+    return;
+  }
+
+  // ── Tracker Edit Detail ──
+  if (data === 'tracker_edit_sm' || data === 'tracker_edit_kol') {
+    const { getAutoConfig } = require('../src/autotrade');
+    const { DEFAULT_TRACKER_CONFIG } = require('../src/smartmoney-tracker');
+
+    const isSm = data === 'tracker_edit_sm';
+    const cfgKey = isSm ? 'smartmoneyTracker' : 'kolTracker';
+    const trackerKey = isSm ? 'smartmoney' : 'kol';
+    const defaults = isSm ? DEFAULT_TRACKER_CONFIG.smartmoney : DEFAULT_TRACKER_CONFIG.kol;
+    const icon = isSm ? '🧠' : '👑';
+    const label = isSm ? 'SmartMoney' : 'KOL';
+    const prefix = isSm ? 'sm' : 'kol';
+
+    const cfg = getAutoConfig();
+    if (!cfg[cfgKey]) cfg[cfgKey] = {};
+    if (!cfg[cfgKey][trackerKey]) cfg[cfgKey][trackerKey] = { ...defaults };
+
+    const t = cfg[cfgKey][trackerKey];
+
+    const lines = [
+      `${icon} <b>${label} Settings</b>`,
+      ``,
+      `Status: ${t.enabled ? '✅ ON' : '❌ OFF'}`,
+      `Interval: ${t.intervalSec}s`,
+      `Min Amount: $${t.minAmountUsd}`,
+      `Min Score: ${t.minScore || (isSm ? 50 : 55)}`,
+    ];
+
+    await tgApi('editMessageText', {
+      chat_id: chatId,
+      message_id: msgId,
+      text: lines.join('\n'),
+      parse_mode: 'HTML',
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: `${t.enabled ? '🔴 OFF' : '🟢 ON'}`, callback_data: `tracker_toggle_${prefix}` },
+           { text: `⏱ ${t.intervalSec}s`, callback_data: `tracker_ask_interval_${prefix}` },
+           { text: `💰 $${t.minAmountUsd}`, callback_data: `tracker_ask_amount_${prefix}` }],
+          [{ text: `📊 Min Score: ${t.minScore || (isSm ? 50 : 55)}`, callback_data: `tracker_ask_minscore_${prefix}` }],
+          [{ text: '⬅️ Config', callback_data: 'menu_config' }],
+        ]
+      }
+    });
+    return;
+  }
+
+  // ── Tracker Ask Value (prompt user to type) ──
+  if (data.startsWith('tracker_ask_')) {
+    const match = data.match(/^tracker_ask_(interval|amount|minscore)_(sm|kol)$/);
+    if (!match) return;
+    const [, field, prefix] = match;
+    const label = prefix === 'sm' ? 'SmartMoney' : 'KOL';
+    const fieldLabels = { interval: 'Interval (detik)', amount: 'Min Amount (USD)', minscore: 'Min Score' };
+    const examples = { interval: '30', amount: '10', minscore: '50' };
+
+    await tgApi('sendMessage', {
+      chat_id: chatId,
+      text: `✏️ <b>${label} — ${fieldLabels[field]}</b>\n\nKirim angka baru:\nContoh: <code>${examples[field]}</code>`,
+      parse_mode: 'HTML',
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '❌ Cancel', callback_data: `tracker_edit_${prefix}` }],
+        ]
+      }
+    });
+
+    // Set waiting state via pendingInputs
+    pendingInputs.set(chatId, {
+      type: 'tracker',
+      field,
+      prefix,
+      hint: `Kirim angka untuk ${fieldLabels[field]}`,
+      min: field === 'interval' ? 10 : field === 'minscore' ? 10 : 0,
+      max: field === 'interval' ? 3600 : field === 'amount' ? 10000 : 100,
+    });
     return;
   }
 
@@ -401,6 +511,30 @@ async function handleCallbackQuery(cq) {
   if (sigWeightMatch) return cfgSignalWeightPromptInput(chatId, parseInt(sigWeightMatch[1]));
   const sigWeightSetMatch = data.match(/^cfg_signal_wset_(\d+)_(-?\d+)$/);
   if (sigWeightSetMatch) return cfgSignalWeightSet(chatId, parseInt(sigWeightSetMatch[1]), parseInt(sigWeightSetMatch[2]));
+
+  // ── Buy Lock handlers ──
+  if (data === 'cfg_buylock_toggle') {
+    const { updateAutoConfig, getAutoConfig } = require('../src/autotrade');
+    const cfg = getAutoConfig();
+    const current = cfg.buyLock?.enabled !== false;
+    updateAutoConfig({ buyLock: { ...(cfg.buyLock || {}), enabled: !current } });
+    return sendConfigMenu(chatId);
+  }
+  if (data === 'cfg_buylock_ttl') {
+    pendingInputs.set(chatId, {
+      type: 'config',
+      configKey: 'buyLock.ttlSec',
+      hint: 'Buy Lock TTL (seconds). Default: 300',
+      min: 30,
+      max: 3600,
+    });
+    return tgApi('sendMessage', {
+      chat_id: chatId,
+      text: '🔒 <b>Buy Lock TTL</b>\n\nKirim detik baru:\nContoh: <code>300</code> (5 menit)\nMin: 30 | Max: 3600',
+      parse_mode: 'HTML',
+      reply_markup: { inline_keyboard: [[{ text: '❌ Cancel', callback_data: 'menu_config' }]] },
+    });
+  }
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -494,6 +628,67 @@ async function handlePendingInput(chatId, text) {
     updateAutoConfig({ signalScanner: { ...(cfg.signalScanner || {}), [key]: num } });
     pendingInputs.delete(chatId);
     await sendSignalMenu(chatId);
+    return true;
+  }
+
+  // Tracker field
+  if (pending.type === 'tracker') {
+    const { updateAutoConfig, getAutoConfig } = require('../src/autotrade');
+    const { DEFAULT_TRACKER_CONFIG } = require('../src/smartmoney-tracker');
+
+    const isSm = pending.prefix === 'sm';
+    const cfgKey = isSm ? 'smartmoneyTracker' : 'kolTracker';
+    const trackerKey = isSm ? 'smartmoney' : 'kol';
+    const defaults = isSm ? DEFAULT_TRACKER_CONFIG.smartmoney : DEFAULT_TRACKER_CONFIG.kol;
+
+    const cfg = getAutoConfig();
+    if (!cfg[cfgKey]) cfg[cfgKey] = {};
+    if (!cfg[cfgKey][trackerKey]) cfg[cfgKey][trackerKey] = { ...defaults };
+
+    const fieldMap = { interval: 'intervalSec', amount: 'minAmountUsd', minscore: 'minScore' };
+    updateAutoConfig({ [cfgKey]: { ...cfg[cfgKey], [trackerKey]: { ...cfg[cfgKey][trackerKey], [fieldMap[pending.field]]: num } } });
+    pendingInputs.delete(chatId);
+
+    // Re-show tracker edit detail (stay on settings page)
+    const editData = isSm ? 'tracker_edit_sm' : 'tracker_edit_kol';
+    // Simulate callback by re-triggering the edit handler
+    const t = getAutoConfig()[cfgKey][trackerKey];
+    const icon = isSm ? '🧠' : '👑';
+    const label = isSm ? 'SmartMoney' : 'KOL';
+    const prefix = isSm ? 'sm' : 'kol';
+    const minScoreDefault = isSm ? 50 : 55;
+    const lines = [
+      `${icon} <b>${label} Settings</b>`,
+      ``,
+      `Status: ${t.enabled ? '✅ ON' : '❌ OFF'}`,
+      `Interval: ${t.intervalSec}s`,
+      `Min Amount: $${t.minAmountUsd}`,
+      `Min Score: ${t.minScore || minScoreDefault}`,
+    ];
+    await tgApi('sendMessage', {
+      chat_id: chatId,
+      text: lines.join('\n'),
+      parse_mode: 'HTML',
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: `${t.enabled ? '🔴 OFF' : '🟢 ON'}`, callback_data: `tracker_toggle_${prefix}` },
+           { text: `⏱ ${t.intervalSec}s`, callback_data: `tracker_ask_interval_${prefix}` },
+           { text: `💰 $${t.minAmountUsd}`, callback_data: `tracker_ask_amount_${prefix}` }],
+          [{ text: `📊 Min Score: ${t.minScore || minScoreDefault}`, callback_data: `tracker_ask_minscore_${prefix}` }],
+          [{ text: '⬅️ Config', callback_data: 'menu_config' }],
+        ]
+      }
+    });
+    return true;
+  }
+
+  // Buy Lock TTL (nested key)
+  if (pending.configKey === 'buyLock.ttlSec') {
+    const { updateAutoConfig, getAutoConfig } = require('../src/autotrade');
+    const cfg = getAutoConfig();
+    updateAutoConfig({ buyLock: { ...(cfg.buyLock || {}), ttlSec: num } });
+    pendingInputs.delete(chatId);
+    await sendConfigMenu(chatId);
     return true;
   }
 

@@ -88,19 +88,66 @@ function loadAutoConfig() {
   return autoConfig;
 }
 
+// ─── Global Buy Lock ────────────────────────────────────
+const buyLocks = new Map();  // CA → timestamp
+
+function isBuyLocked(mint) {
+  const cfg = loadAutoConfig();
+  if (!cfg.buyLock?.enabled) return false;
+  if (!buyLocks.has(mint)) return false;
+  const ttlMs = (cfg.buyLock?.ttlSec || 300) * 1000;
+  const elapsed = Date.now() - buyLocks.get(mint);
+  if (elapsed > ttlMs) {
+    buyLocks.delete(mint);
+    return false;
+  }
+  return true;
+}
+
+function getBuyLockRemaining(mint) {
+  const cfg = loadAutoConfig();
+  const ttlMs = (cfg.buyLock?.ttlSec || 300) * 1000;
+  if (!buyLocks.has(mint)) return 0;
+  const remaining = ttlMs - (Date.now() - buyLocks.get(mint));
+  return Math.max(0, Math.ceil(remaining / 1000));
+}
+
+function setBuyLock(mint) {
+  buyLocks.set(mint, Date.now());
+}
+
+function getBuyLockStatus() {
+  const cfg = loadAutoConfig();
+  return {
+    enabled: cfg.buyLock?.enabled !== false,
+    ttlSec: cfg.buyLock?.ttlSec || 300,
+    activeLocks: buyLocks.size,
+  };
+}
+
 // ─── Auto-Buy on Screener Alert ────────────────────────
 async function autoBuy(tokenData) {
   const cfg = loadAutoConfig();
   if (!cfg.enabled) return null;
 
-  const openPos = getOpenPositions();
+  const mint = tokenData.address;
+  const symbol = tokenData.symbol;
+
+  // Buy lock check — source-agnostic, per CA
+  if (isBuyLocked(mint)) {
+    const remaining = getBuyLockRemaining(mint);
+    console.log(`[AUTO] ${symbol} buy locked (${remaining}s remaining), skip`);
+    return { skipped: true, reason: 'buy_lock', remaining };
+  }
+
+  // Use correct positions source based on mode (live vs dry-run)
+  const isDryMode = cfg.mode === 'dry_run';
+  const openPos = isDryMode ? dryRun.getOpenDryPositions() : getOpenPositions();
   if (openPos.length >= cfg.maxOpenPositions) {
     console.log(`[AUTO] Max positions (${cfg.maxOpenPositions}) reached, skip`);
     return null;
   }
 
-  const mint = tokenData.address;
-  const symbol = tokenData.symbol;
   const score = tokenData._score || 0;
 
   if (score < cfg.minScore) {
@@ -203,7 +250,7 @@ async function autoBuy(tokenData) {
     const remainingPct = 100 - allocatedPct;
     if (remainingPct > 0) partialLines.push(`• Remaining ${remainingPct}%: trailing TP (drop ${cfg.trailingDropPct}% from peak)`);
 
-    const fmtMc = (v) => v >= 1e6 ? `$${(v/1e6).toFixed(1)}M` : v >= 1e3 ? `$${(v/1e3).toFixed(0)}K` : `$${v}`;
+    const fmtMc = (v) => !v || v <= 0 ? '$0' : `$${Math.round(v).toLocaleString('en-US')}`;
     await sendTelegram(
       `🟡 <b>DRY RUN — Auto-Buy: ${symbol}</b>\n\n` +
       `💰 Would spend: ${cfg.buyAmountSol} SOL\n` +
@@ -280,7 +327,7 @@ async function autoBuy(tokenData) {
       const remainingPct = 100 - allocatedPct;
       if (remainingPct > 0) partialLines.push(`• Remaining ${remainingPct}%: trailing TP (drop ${cfg.trailingDropPct}% from peak)`);
 
-      const fmtMc = (v) => v >= 1e6 ? `$${(v/1e6).toFixed(1)}M` : v >= 1e3 ? `$${(v/1e3).toFixed(0)}K` : `$${v}`;
+      const fmtMc = (v) => !v || v <= 0 ? '$0' : `$${Math.round(v).toLocaleString('en-US')}`;
       await sendTelegram(
         `🤖 <b>Auto-Buy: ${symbol}</b>\n\n` +
         `💰 Spent: ${cfg.buyAmountSol} SOL\n` +
@@ -295,6 +342,9 @@ async function autoBuy(tokenData) {
         `<a href="https://gmgn.ai/sol/token/${mint}">GMGN</a>`,
         { reply_markup: autoBuyButtons(mint) }
       );
+
+      // Set buy lock after successful buy
+      setBuyLock(mint);
 
       return pos;
     }
@@ -385,13 +435,13 @@ async function executeFullExit(pos, reason, quoteSolOut = 0) {
   if (pos.isDryRun) {
     const closed = dryRun.closeDryPosition(pos.tokenMint, quoteSolOut, reason);
 
-    // Exit PNL: only from remaining amount sold (not cumulative with partials)
+    // Exit PNL: profit/loss from this exit relative to original entry
     const remainingCostBasis = pos.solSpent - (pos.totalSolReceived || 0);
     const exitPnl = quoteSolOut - remainingCostBasis;
-    const exitPnlPct = remainingCostBasis > 0 ? (exitPnl / remainingCostBasis * 100) : 0;
+    const exitPnlPct = pos.solSpent > 0 ? (exitPnl / pos.solSpent * 100) : 0;
 
     const isRug = closed.pnlPct <= -80;
-    const emoji = exitPnl >= 0 ? '🟢' : (isRug ? '💀' : '🔴');
+    const emoji = closed.pnl >= 0 ? '🟢' : (isRug ? '💀' : '🔴');
     const header = isRug ? `🟡 <b>DRY RUN — RUG — ${pos.symbol}</b>` : `${emoji} <b>DRY RUN — Auto-Sell (${reason}): ${pos.symbol}</b>`;
 
     // Show partial sell info if any
@@ -399,13 +449,18 @@ async function executeFullExit(pos, reason, quoteSolOut = 0) {
       ? `📦 Partial sold: ${(pos.totalSolReceived || 0).toFixed(4)} SOL\n`
       : '';
 
+    // Reason detail: show peak/drop info for trailing exits
+    const reasonDetail = reason === 'trailing' && pos.peakPnlPct != null
+      ? ` (${reason}, peak +${pos.peakPnlPct}%, dropped ${autoConfig.trailingDropPct}%)`
+      : ` (${reason})`;
+
     await sendTelegram(
       `${header}\n\n` +
+      `📊 <b>Total PNL: ${closed.pnl >= 0 ? '+' : ''}${closed.pnl.toFixed(4)} SOL (${closed.pnlPct >= 0 ? '+' : ''}${closed.pnlPct}%)</b>\n` +
       `💰 Would get: ~${quoteSolOut.toFixed(4)} SOL\n` +
       partialInfo +
-      `📊 Exit PNL: ${exitPnl >= 0 ? '+' : ''}${exitPnl.toFixed(4)} SOL (${exitPnlPct >= 0 ? '+' : ''}${exitPnlPct.toFixed(1)}%)\n` +
-      `📊 Total PNL: ${closed.pnl >= 0 ? '+' : ''}${closed.pnl.toFixed(4)} SOL (${closed.pnlPct >= 0 ? '+' : ''}${closed.pnlPct}%)\n` +
-      `📝 Reason: ${reason}\n` +
+      `📝 Exit PNL (remaining): ${exitPnl >= 0 ? '+' : ''}${exitPnl.toFixed(4)} SOL (${exitPnlPct >= 0 ? '+' : ''}${exitPnlPct.toFixed(1)}%)\n` +
+      `📝 Reason:${reasonDetail}\n` +
       `📈 Peak was: +${pos.peakPnlPct ?? '?'}%`,
       { reply_markup: { inline_keyboard: [
         [{ text: '📊 Positions', callback_data: 'menu_positions' },
@@ -500,7 +555,7 @@ async function checkRugSignals(pos) {
     if (snap.liquidity > 1000 && curLiq > 0) {
       const liqDrop = ((snap.liquidity - curLiq) / snap.liquidity) * 100;
       if (liqDrop > 50) {
-        signals.push(`Liquidity dropped ${liqDrop.toFixed(0)}% ($${(snap.liquidity/1000).toFixed(1)}K → $${(curLiq/1000).toFixed(1)}K)`);
+        signals.push(`Liquidity dropped ${liqDrop.toFixed(0)}% ($${Math.round(snap.liquidity).toLocaleString()} → $${Math.round(curLiq).toLocaleString()})`);
         rugScore += 30;
       }
     }
@@ -975,6 +1030,8 @@ function resetPartialSells() {
 module.exports = {
   autoBuy, checkPositions, startMonitor,
   updateAutoConfig, getAutoConfig, loadAutoConfig,
+  getOpenPositions,
   setPartialSells, addPartialSell, removePartialSell, resetPartialSells,
   editPartialSell, disablePartialSell, enablePartialSell,
+  isBuyLocked, getBuyLockRemaining, setBuyLock, getBuyLockStatus,
 };
