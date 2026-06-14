@@ -435,7 +435,6 @@ Select option:
 /wallet      — Wallet management
 /config      — Show/edit config
 /tracker     — SmartMoney + KOL tracker settings
-/screen      — Run screener manually (one-shot)
 /help        — Show all commands
 ```
 
