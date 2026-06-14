@@ -9,6 +9,7 @@ const { exec } = require('child_process');
 const util = require('util');
 const execAsync = util.promisify(exec);
 const { setGlobalDedup, checkGlobalDedup } = require('./signal-scanner');
+const { getAutoConfig } = require('./autotrade');
 
 const OUTPUT_DIR = path.join(__dirname, '..', 'output');
 const SM_SEEN_FILE = path.join(OUTPUT_DIR, 'gmgn-seen-sm.json');
@@ -259,7 +260,15 @@ async function runTrackerScan(type, processToken) {
     for (const trade of filtered) {
       const addr = trade.base_address;
       if (!addr) continue;
-      if (seen[addr]) { skippedDedup++; continue; }
+      // Per-source dedup with TTL check
+      if (seen[addr]) {
+        const cfg = getAutoConfig();
+        const ttlMs = (cfg.dedup?.globalTtlSec || 180) * 1000;
+        if (Date.now() - (seen[addr].ts || 0) < ttlMs) {
+          skippedDedup++; continue;
+        }
+        delete seen[addr];
+      }
 
       // Global dedup (shared with signal scanner)
       if (checkGlobalDedup(addr)) { skippedDedup++; continue; }

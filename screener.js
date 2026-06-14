@@ -356,7 +356,16 @@ async function runScan() {
       if (CONFIG.maxBotDegen != null && botDegen > CONFIG.maxBotDegen) { stats.botdegen++; continue; }
     }
 
-    if (seen[addr]) { stats.seen++; continue; }
+    // Per-source dedup with TTL check
+    if (seen[addr]) {
+      const cfg = getAutoConfig();
+      const ttlMs = (cfg.dedup?.globalTtlSec || 180) * 1000;
+      if (Date.now() - (seen[addr].ts || 0) < ttlMs) {
+        stats.seen++; continue;
+      }
+      // Expired — allow re-scan
+      delete seen[addr];
+    }
 
     // Global dedup check (prevents same token from trending+trenches+signal)
     const globalDedup = checkGlobalDedup(addr);

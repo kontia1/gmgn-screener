@@ -432,10 +432,14 @@ async function runSignalScan(processToken) {
 
       if (!addr) continue;
 
-      // Per-source dedup
+      // Per-source dedup with TTL check
       if (seen[addr]) {
-        skippedDedup++;
-        continue;
+        const config = getSignalConfig();
+        const ttlMs = (config.dedup?.globalTtlSec || 180) * 1000;
+        if (Date.now() - (seen[addr].ts || 0) < ttlMs) {
+          skippedDedup++; continue;
+        }
+        delete seen[addr];
       }
 
       // Global dedup
