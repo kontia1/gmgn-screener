@@ -1076,7 +1076,7 @@ function startMonitor() {
             // Layer 2: Hard SL — instant sell during soft wait
             if (pnlPct <= -hardSlPct) {
               console.log(`[SOFT-SL-FAST] ${pos.symbol}: HARD SL hit during soft wait (${pnlPct.toFixed(1)}% <= -${hardSlPct}%) — instant sell`);
-              await executeFullExit(pos, `HARD SL (during soft wait, ${pnlPct.toFixed(1)}%)`, 0, { lockHeld: true });
+              await executeFullExit(pos, `HARD SL (during soft wait, ${pnlPct.toFixed(1)}%)`, quoteSolOut, { lockHeld: true });
               continue;
             }
 
@@ -1084,7 +1084,7 @@ function startMonitor() {
             const elapsed = (Date.now() - pos.softSlTriggeredAt) / 1000;
             if (elapsed >= softSlWaitSec && pnlPct <= -softSlPct) {
               console.log(`[SOFT-SL-FAST] ${pos.symbol}: Soft SL timer expired (${elapsed.toFixed(0)}s >= ${softSlWaitSec}s, PNL ${pnlPct.toFixed(1)}%) — selling`);
-              await executeFullExit(pos, `Soft SL (fast-check, waited ${Math.round(elapsed)}s)`, 0, { lockHeld: true });
+              await executeFullExit(pos, `Soft SL (fast-check, waited ${Math.round(elapsed)}s)`, quoteSolOut, { lockHeld: true });
               continue;
             }
 
@@ -1132,7 +1132,15 @@ function startMonitor() {
 
           if (liqDrop >= liqExitPct) {
             console.log(`[LIQ-DRAIN] ${pos.symbol}: liquidity dropped ${liqDrop.toFixed(0)}% ($${Math.round(entryLiq)} → $${Math.round(curLiq)}) — instant exit`);
-            await executeFullExit(pos, `Liq Drain (-${liqDrop.toFixed(0)}%, $${Math.round(entryLiq)}→$${Math.round(curLiq)})`, 0, { lockHeld: true });
+            // Get quote for accurate PNL in notifications
+            let liqQuoteSol = 0;
+            try {
+              const { getQuote: lqGetQuote, SOL_MINT: lqSol } = require('./trading');
+              const lqRaw = Math.floor(pos.remainingTokens * Math.pow(10, pos.decimals));
+              const lqQuote = await lqGetQuote(pos.tokenMint, lqSol, lqRaw, 500);
+              liqQuoteSol = parseFloat(lqQuote.outAmount) / 1e9;
+            } catch (_) {}
+            await executeFullExit(pos, `Liq Drain (-${liqDrop.toFixed(0)}%, $${Math.round(entryLiq)}→$${Math.round(curLiq)})`, liqQuoteSol, { lockHeld: true });
           } else if (liqDrop >= liqWarnPct) {
             // Warning at 30% — don't sell yet, but alert
             console.log(`[LIQ-DRAIN] ${pos.symbol}: liquidity warning ${liqDrop.toFixed(0)}% drop ($${Math.round(entryLiq)} → $${Math.round(curLiq)})`);
