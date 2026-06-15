@@ -169,11 +169,11 @@ function scoreToken(t, ageMin) {
   if (sniper >= 10 && sniper <= 40) { score += 3; r.push(`${sniper} snipers`); }
   else if (sniper > 60) { score -= 3; r.push(`⚠️ ${sniper} snipers`); }
 
-  const p5m = t.price_change_percent5m || 0;
+  const p5m = isNaN(t.price_change_percent5m) ? 0 : (t.price_change_percent5m || 0);
   if (p5m >= 5 && p5m <= 30) { score += 3; r.push(`5m +${p5m.toFixed(0)}%`); }
   else if (p5m > 100) { score -= 3; r.push(`⚠️ 5m +${p5m.toFixed(0)}%`); }
 
-  const p1h = t.price_change_percent1h || 0;
+  const p1h = isNaN(t.price_change_percent1h) ? 0 : (t.price_change_percent1h || 0);
   if (p1h > 0 && p1h < 150) { score += 2; r.push(`1h +${p1h.toFixed(0)}%`); }
   else if (p1h >= 500) { score -= 3; r.push(`⚠️ 1h +${p1h.toFixed(0)}%`); }
   else if (p1h < -20) { score -= 4; r.push(`⚠️ 1h ${p1h.toFixed(0)}%`); }

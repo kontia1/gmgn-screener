@@ -104,7 +104,7 @@ function checkGlobalDedup(tokenAddress) {
   if (!entry) return null;
 
   const config = getSignalConfig();
-  const ttlMs = (config.dedup?.globalTtlSec || 300) * 1000;
+  const ttlMs = (config.dedup?.globalTtlSec || 180) * 1000;
   const now = Date.now();
 
   if (now - entry.lastSeen > ttlMs) {
@@ -138,7 +138,7 @@ function setGlobalDedup(tokenAddress, source) {
 function cleanupGlobalDedup() {
   const dedup = loadGlobalDedup();
   const config = getSignalConfig();
-  const ttlMs = (config.dedup?.globalTtlSec || 300) * 1000;
+  const ttlMs = (config.dedup?.globalTtlSec || 180) * 1000;
   const now = Date.now();
   let cleaned = 0;
 
@@ -459,8 +459,9 @@ async function runSignalScan(processToken) {
         console.error(`[SIGNAL] Process ${token.symbol} failed: ${e.message}`);
       }
 
-      // Set seen
-      seen[addr] = { ts: Date.now() };
+      // Set seen — token._score set by processToken callback in index.js
+      const mc = token.market_cap || token.fdv || 0;
+      seen[addr] = { ts: Date.now(), symbol: token.symbol || '?', score: token._score || 0, price: token.price || 0, mc, name: token.symbol || '?', vol: token.volume_24h || 0, holders: token.holder_count || 0, phase: 2, reasons: [] };
       setGlobalDedup(addr, 'signal');
     }
 

@@ -18,12 +18,18 @@ const DEFAULT_CONFIG = {
   buyAmountSol: 0.05,
   slippageBps: 500,
   // 2-Layer SL
-  softSlPct: 15,              // Layer 1: soft SL threshold (e.g. -15%)
+  softSlPct: 20,              // Layer 1: soft SL threshold (-20%)
   softSlWaitSec: 30,          // Layer 1: wait time before selling (seconds)
-  hardSlPct: 40,              // Layer 2: hard SL threshold (e.g. -40%), instant sell
-  slPct: 40,                  // Legacy fallback (maps to hardSlPct)
+  hardSlPct: 25,              // Layer 2: hard SL threshold (-25%), instant sell
+  slPct: 25,                  // Legacy fallback (maps to hardSlPct)
   trailingDropPct: 15,       // sell when price drops 15% from peak
-  trailingTriggerPct: 20,    // only activate trailing after peak PNL > 20%
+  trailingTriggerPct: 30,    // only activate trailing after peak PNL > 30%
+  // Liquidity drain detection
+  liqDrainEnabled: true,      // enable liquidity drain fast-check
+  liqDrainExitPct: 50,        // instant exit when liq drops this % from entry
+  liqDrainWarnPct: 30,        // warning alert when liq drops this % from entry
+  liqDrainCheckSec: 10,       // check interval per position (seconds)
+  liqDrainMinLiq: 1000,       // skip positions with entry liq below this ($)
   minScore: 60,
   maxOpenPositions: 5,
   checkIntervalSec: 15,
@@ -84,6 +90,24 @@ function loadAutoConfig() {
       if (saved.partialSells) partialSells = saved.partialSells;
       delete autoConfig.partialSells; // don't keep in autoConfig, stored separately
     }
+  } catch (e) { console.error('[AUTO] Config load error:', e.message); }
+  // Restore post-close locks from closed positions
+  try {
+    const closedFile = path.join(__dirname, '..', 'data', 'closed.json');
+    const closed = JSON.parse(fs.readFileSync(closedFile, 'utf8'));
+    if (Array.isArray(closed)) {
+      const now = Date.now();
+      for (const c of closed) {
+        if (c.tokenMint && c.closedAt) {
+          const closedAt = new Date(c.closedAt).getTime();
+          const elapsed = now - closedAt;
+          if (elapsed < POST_CLOSE_LOCK_MS) {
+            buyLocks.set(c.tokenMint, { ts: closedAt, ttlMs: POST_CLOSE_LOCK_MS });
+          }
+        }
+      }
+      console.log(`[AUTO] Restored ${buyLocks.size} post-close locks from history`);
+    }
   } catch {}
   return autoConfig;
 }
@@ -92,9 +116,20 @@ function loadAutoConfig() {
 const buyLocks = new Map();  // CA → { ts, ttlMs }
 const POST_CLOSE_LOCK_MS = 24 * 60 * 60 * 1000; // 24 hours
 
+// C2 FIX: Per-mint sell mutex — prevents concurrent sells for same token
+const sellLocks = new Map();  // CA → boolean
+function acquireSellLock(mint) {
+  if (sellLocks.get(mint)) return false;
+  sellLocks.set(mint, true);
+  return true;
+}
+function releaseSellLock(mint) {
+  sellLocks.delete(mint);
+}
+
 function isBuyLocked(mint) {
   const cfg = loadAutoConfig();
-  if (!cfg.buyLock?.enabled) return false;
+  if (cfg.buyLock?.enabled === false) return false;  // explicit false = disabled
   if (!buyLocks.has(mint)) return false;
   const lock = buyLocks.get(mint);
   const elapsed = Date.now() - lock.ts;
@@ -147,6 +182,9 @@ async function autoBuy(tokenData) {
     console.log(`[AUTO] ${symbol} buy locked (${remaining}s remaining), skip`);
     return { skipped: true, reason: 'buy_lock', remaining };
   }
+
+  // C1 FIX: Set pending buy lock immediately to prevent race condition duplicate buys
+  setBuyLock(mint, 30000); // 30s pending lock — prevents concurrent autoBuy for same mint
 
   // Use correct positions source based on mode (live vs dry-run)
   const isDryMode = cfg.mode === 'dry_run';
@@ -436,13 +474,21 @@ async function executePartialSell(pos, partial, currentPrice) {
 }
 
 // ─── Execute Full Exit (trailing/SL) ───────────────────
-async function executeFullExit(pos, reason, quoteSolOut = 0) {
-  console.log(`[AUTO] Full exit ${pos.symbol} (${reason})`);
-  setPostCloseLock(pos.tokenMint);
+async function executeFullExit(pos, reason, quoteSolOut = 0, { lockHeld = false } = {}) {
+  // Normalize reason to string
+  const reasonStr = typeof reason === 'object' ? (reason.type || JSON.stringify(reason)) : String(reason);
+  // C2 FIX: Acquire sell lock to prevent concurrent sells
+  if (!lockHeld && !acquireSellLock(pos.tokenMint)) {
+    console.log(`[AUTO] ${pos.symbol}: sell lock held, skipping exit (${reasonStr})`);
+    return { success: false, reason: 'lock_held' };
+  }
+  console.log(`[AUTO] Full exit ${pos.symbol} (${reasonStr})`);
 
   // DRY RUN — virtual full exit
   if (pos.isDryRun) {
-    const closed = dryRun.closeDryPosition(pos.tokenMint, quoteSolOut, reason);
+    const closed = dryRun.closeDryPosition(pos.tokenMint, quoteSolOut, reasonStr);
+    setPostCloseLock(pos.tokenMint); // H4 FIX: after close for dry run (no sell to fail)
+    releaseSellLock(pos.tokenMint);
 
     // Exit PNL: profit/loss from this exit relative to original entry
     const remainingCostBasis = pos.solSpent - (pos.totalSolReceived || 0);
@@ -451,7 +497,7 @@ async function executeFullExit(pos, reason, quoteSolOut = 0) {
 
     const isRug = closed.pnlPct <= -80;
     const emoji = closed.pnl >= 0 ? '🟢' : (isRug ? '💀' : '🔴');
-    const header = isRug ? `🟡 <b>DRY RUN — RUG — ${pos.symbol}</b>` : `${emoji} <b>DRY RUN — Auto-Sell (${reason}): ${pos.symbol}</b>`;
+    const header = isRug ? `🟡 <b>DRY RUN — RUG — ${pos.symbol}</b>` : `${emoji} <b>DRY RUN — Auto-Sell (${reasonStr}): ${pos.symbol}</b>`;
 
     // Show partial sell info if any
     const partialInfo = (pos.totalSolReceived || 0) > 0
@@ -459,9 +505,9 @@ async function executeFullExit(pos, reason, quoteSolOut = 0) {
       : '';
 
     // Reason detail: show peak/drop info for trailing exits
-    const reasonDetail = reason === 'trailing' && pos.peakPnlPct != null
-      ? ` (${reason}, peak +${pos.peakPnlPct}%, dropped ${autoConfig.trailingDropPct}%)`
-      : ` (${reason})`;
+    const reasonDetail = reasonStr.startsWith('trailing') && pos.peakPnlPct != null
+      ? ` (${reasonStr}, peak +${pos.peakPnlPct}%, dropped ${autoConfig.trailingDropPct}%)`
+      : ` (${reasonStr})`;
 
     await sendTelegram(
       `${header}\n\n` +
@@ -477,23 +523,25 @@ async function executeFullExit(pos, reason, quoteSolOut = 0) {
         [{ text: '🏠 Menu', callback_data: 'menu_main' }],
       ]} }
     );
-    return;
+    return { success: true, received: quoteSolOut, pnl: closed.pnl, pnlPct: closed.pnlPct };
   }
 
   try {
     const result = await sellAll(pos.tokenMint, autoConfig.walletLabel, 500);
 
     if (result.success) {
-      const closed = closePosition(pos.tokenMint, result.outputSol, result.signature, reason);
+      const closed = closePosition(pos.tokenMint, result.outputSol, result.signature, reasonStr);
+      setPostCloseLock(pos.tokenMint); // H4 FIX: AFTER successful sell
+      releaseSellLock(pos.tokenMint); // C2 FIX
 
       const isRug = closed.pnlPct <= -80;
       const emoji = closed.pnl >= 0 ? '🟢' : (isRug ? '💀' : '🔴');
-      const header = isRug ? `💀 <b>RUG — ${pos.symbol}</b>` : `${emoji} <b>Auto-Sell (${reason}): ${pos.symbol}</b>`;
+      const header = isRug ? `💀 <b>RUG — ${pos.symbol}</b>` : `${emoji} <b>Auto-Sell (${reasonStr}): ${pos.symbol}</b>`;
       await sendTelegram(
         `${header}\n\n` +
         `💰 Got: ${result.outputSol.toFixed(4)} SOL\n` +
         `📊 PNL: ${closed.pnl >= 0 ? '+' : ''}${closed.pnl.toFixed(4)} SOL (${closed.pnlPct}%)\n` +
-        `📝 Reason: ${reason}\n` +
+        `📝 Reason: ${reasonStr}\n` +
         `📈 Peak was: +${pos.peakPnlPct ?? '?'}%\n\n` +
         `🔗 <a href="https://solscan.io/tx/${result.signature}">TX</a>`,
         { reply_markup: { inline_keyboard: [
@@ -502,10 +550,13 @@ async function executeFullExit(pos, reason, quoteSolOut = 0) {
           [{ text: '🏠 Menu', callback_data: 'menu_main' }],
         ]} }
       );
+      return { success: true, received: result.outputSol, pnl: closed.pnl, pnlPct: closed.pnlPct };
     }
   } catch (e) {
+    releaseSellLock(pos.tokenMint); // C2 FIX: Release on error
     console.error(`[AUTO] Full exit failed: ${e.message}`);
     await sendTelegram(`❌ Auto-Sell failed: ${pos.symbol}\n${e.message}`);
+    return { success: false, reason: 'sell_error', error: e.message };
   }
 }
 
@@ -717,72 +768,7 @@ async function checkPositions() {
       const pnlSol = totalValueSol - pos.solSpent;
       const pnlPct = pos.solSpent > 0 ? (pnlSol / pos.solSpent * 100) : 0;
 
-      // Bundler detection — check every 30 seconds (not every 10s to avoid API rate limits)
-      const now = Date.now();
-      const lastBundlerCheck = pos.lastBundlerCheck || 0;
-      if (now - lastBundlerCheck > 30000) {
-        try {
-          const bundlerResult = await checkBundlerPattern(pos.tokenMint, pos.mc || 0, pos.symbol);
-          if (pos.isDryRun) dryRun.updateDryPosition(pos.tokenMint, { lastBundlerCheck: now });
-          else updatePosition(pos.tokenMint, { lastBundlerCheck: now });
-          
-          // Save detection for learning (even if not bundler)
-          saveBundlerDetection(pos.tokenMint, pos.symbol, bundlerResult);
-          
-          if (bundlerResult.isBundler) {
-            console.log(`[AUTO] 🚨 ${pos.symbol}: BUNDLER DETECTED — ${bundlerResult.details}`);
-            
-            // Send alert
-            const bundlerMsg = [
-              `🚨 <b>BUNDLER DETECTED</b>`,
-              ``,
-              `Token: <b>${pos.symbol || 'Unknown'}</b>`,
-              `CA: <code>${pos.tokenMint}</code>`,
-              `Entry: ${pos.solSpent?.toFixed(4) || '?'} SOL`,
-              `PNL: ${pnlPct?.toFixed(1) || '?'}%`,
-              ``,
-              `⚠️ Pattern: ${bundlerResult.details}`,
-              `Transfers: ${bundlerResult.transfers} | Payers: ${bundlerResult.uniquePayers}`,
-              ``,
-              `Selling immediately to avoid dump...`,
-            ].join('\n');
-            sendTelegram(bundlerMsg, { parse_mode: 'HTML' }).catch(() => {});
-            
-            if (pos.isDryRun) {
-              const virtualSol = quoteSolOut + (pos.totalSolReceived || 0);
-              const closed = dryRun.closeDryPosition(pos.tokenMint, virtualSol, 'bundler_detected');
-              setPostCloseLock(pos.tokenMint);
-              await sendTelegram(
-                `🟡 <b>DRY RUN — Auto-Sell (Bundler): ${pos.symbol}</b>\n\n` +
-                `📊 PNL: ${closed.pnl >= 0 ? '+' : ''}${closed.pnl.toFixed(4)} SOL (${closed.pnlPct}%)\n` +
-                `📝 Reason: Bundler pattern detected`
-              );
-            } else {
-              try {
-                const result = await sellAll(pos.tokenMint, autoConfig.walletLabel, 500);
-                if (result.success) {
-                  const closed = closePosition(pos.tokenMint, result.outputSol, result.signature, 'bundler_detected');
-                  setPostCloseLock(pos.tokenMint);
-                  const emoji = closed.pnl >= 0 ? '🟢' : '🔴';
-                  await sendTelegram(
-                    `${emoji} <b>Auto-Sell (Bundler): ${pos.symbol}</b>\n\n` +
-                    `💰 Got: ${result.outputSol.toFixed(4)} SOL\n` +
-                    `📊 PNL: ${closed.pnl >= 0 ? '+' : ''}${closed.pnl.toFixed(4)} SOL (${closed.pnlPct}%)\n` +
-                    `📝 Reason: Bundler pattern detected\n` +
-                    `🔗 <a href="https://solscan.io/tx/${result.signature}">TX</a>`
-                  );
-                }
-              } catch (sellErr) {
-                console.error(`[AUTO] Bundler sell failed: ${sellErr.message}`);
-              }
-            }
-            continue;
-          }
-        } catch (bundlerErr) {
-          // Don't fail the whole check if bundler detection fails
-          console.error(`[AUTO] Bundler check error: ${bundlerErr.message}`);
-        }
-      }
+      // Bundler check moved to independent 3s loop (checkBundlers)
 
       // Rug detection — check GMGN data changes every 30s
       const rugCheckNow = Date.now();
@@ -962,6 +948,87 @@ async function checkPositions() {
   }
 }
 
+// ─── Bundler-Only Fast Loop (independent from main monitor) ───
+let bundlerRunning = false;
+async function checkBundlers() {
+  if (bundlerRunning) return;
+  bundlerRunning = true;
+  try {
+    const isDry = autoConfig.mode === 'dry_run';
+    const positions = isDry ? dryRun.getOpenDryPositions() : getOpenPositions();
+    if (!positions.length) return;
+
+    const now = Date.now();
+    for (const pos of positions) {
+      const lastCheck = pos.lastBundlerCheck || 0;
+      if (now - lastCheck < 3000) continue; // 3s per position
+
+      let lockAcquired = false;
+      try {
+        const bundlerResult = await checkBundlerPattern(pos.tokenMint, pos.mc || 0, pos.symbol);
+        if (isDry) dryRun.updateDryPosition(pos.tokenMint, { lastBundlerCheck: now });
+        else updatePosition(pos.tokenMint, { lastBundlerCheck: now });
+
+        saveBundlerDetection(pos.tokenMint, pos.symbol, bundlerResult);
+
+        if (bundlerResult.isBundler) {
+          // C2 FIX: Acquire sell lock to prevent concurrent sell from checkPositions
+          if (!acquireSellLock(pos.tokenMint)) {
+            console.log(`[BUNDLER] ${pos.symbol}: sell lock held, skipping (another sell in progress)`);
+            continue;
+          }
+          lockAcquired = true;
+          console.log(`[BUNDLER] 🚨 ${pos.symbol}: ${bundlerResult.details}`);
+          const pnlPct = pos.solSpent > 0 ? (((pos.totalSolReceived || 0) - pos.solSpent) / pos.solSpent * 100) : 0;
+          const bundlerMsg = [
+            `🚨 <b>BUNDLER DETECTED</b>`, ``,
+            `Token: <b>${pos.symbol || 'Unknown'}</b>`,
+            `CA: <code>${pos.tokenMint}</code>`,
+            `Entry: ${pos.solSpent?.toFixed(4) || '?'} SOL`,
+            ``, `⚠️ Pattern: ${bundlerResult.details}`,
+            `Transfers: ${bundlerResult.transfers} | Payers: ${bundlerResult.uniquePayers}`,
+            ``, `Selling immediately...`,
+          ].join('\n');
+          sendTelegram(bundlerMsg, { parse_mode: 'HTML' }).catch(() => {});
+
+          if (isDry) {
+            const closed = dryRun.closeDryPosition(pos.tokenMint, 0, 'bundler_detected');
+            setPostCloseLock(pos.tokenMint);
+            await sendTelegram(`🟡 <b>DRY RUN — Auto-Sell (Bundler): ${pos.symbol}</b>\n\n📊 PNL: ${closed.pnl >= 0 ? '+' : ''}${closed.pnl.toFixed(4)} SOL (${closed.pnlPct}%)`);
+          } else {
+            try {
+              const result = await sellAll(pos.tokenMint, autoConfig.walletLabel, 500);
+              if (result.success) {
+                const closed = closePosition(pos.tokenMint, result.outputSol, result.signature, 'bundler_detected');
+                setPostCloseLock(pos.tokenMint);
+                const emoji = closed.pnl >= 0 ? '🟢' : '🔴';
+                await sendTelegram(`${emoji} <b>Auto-Sell (Bundler): ${pos.symbol}</b>\n\n💰 Got: ${result.outputSol.toFixed(4)} SOL\n📊 PNL: ${closed.pnl >= 0 ? '+' : ''}${closed.pnl.toFixed(4)} SOL (${closed.pnlPct}%)\n🔗 <a href="https://solscan.io/tx/${result.signature}">TX</a>`);
+              }
+            } catch (sellErr) {
+              console.error(`[BUNDLER] Sell failed: ${sellErr.message}`);
+              if (sellErr.message.includes('NO_ROUTES') || sellErr.message.includes('No routes')) {
+                const closed = closePosition(pos.tokenMint, 0, '', 'bundler_no_routes');
+                setPostCloseLock(pos.tokenMint);
+                await sendTelegram(`🔴 <b>Auto-Close (Bundler + No Routes): ${pos.symbol}</b>\n\n📊 PNL: -${pos.solSpent?.toFixed(4) || '?'} SOL (total loss)\n📝 Token is dead — position closed`);
+              }
+            }
+          }
+          // C2 FIX: Release sell lock after bundler sell attempt
+          releaseSellLock(pos.tokenMint);
+          lockAcquired = false;
+        }
+      } catch (e) {
+        if (lockAcquired) releaseSellLock(pos.tokenMint);
+        console.error(`[BUNDLER] Check ${pos.symbol}: ${e.message}`);
+      }
+    }
+  } catch (e) {
+    console.error('[BUNDLER] Loop error:', e.message);
+  } finally {
+    bundlerRunning = false;
+  }
+}
+
 // ─── Start Position Monitor ────────────────────────────
 function startMonitor() {
   if (monitoring) return;
@@ -969,20 +1036,157 @@ function startMonitor() {
   loadAutoConfig();
 
   const modeTag = autoConfig.mode === 'dry_run' ? ' [DRY RUN]' : ' [LIVE]';
-  console.log(`[AUTO] Monitor started${modeTag} (check every ${autoConfig.checkIntervalSec}s, trailing ${autoConfig.trailingDropPct}% from peak, Soft SL:-${autoConfig.softSlPct}%/${autoConfig.softSlWaitSec}s, Hard SL:-${autoConfig.hardSlPct}%)`);
+  console.log(`[AUTO] Monitor started${modeTag} (check every ${autoConfig.checkIntervalSec}s, trailing ${autoConfig.trailingDropPct}% from peak, Soft SL:-${autoConfig.softSlPct}%/${autoConfig.softSlWaitSec}s, Hard SL:-${autoConfig.hardSlPct}%, fast-check: bundler 3s + softSL 3s + liqDrain 10s)`);
 
-  // Use setTimeout loop so interval changes via /config take effect without restart
+  // Main monitor loop (PNL, trailing, SL, partial sells)
   async function tick() {
     try { await checkPositions(); }
     catch (e) { console.error('[AUTO] Monitor error:', e.message); }
     setTimeout(tick, autoConfig.checkIntervalSec * 1000);
   }
   setTimeout(tick, autoConfig.checkIntervalSec * 1000);
+
+  // Danger fast-check loop (3s independent — catches hard SL during soft wait + liquidity drain)
+  let softSlRunning = false;
+  async function softSlTick() {
+    if (softSlRunning) return;
+    softSlRunning = true;
+    try {
+      const isDryMode = autoConfig.mode === 'dry_run';
+      const allPos = isDryMode ? dryRun.getOpenDryPositions() : getOpenPositions();
+
+      // ── Part A: Soft SL fast-check (positions in soft SL waiting state) ──
+      const softWaiting = allPos.filter(p => p.softSlTriggeredAt);
+      if (softWaiting.length > 0) {
+        const softSlPct = autoConfig.softSlPct || 20;
+        const hardSlPct = autoConfig.hardSlPct || autoConfig.slPct || 25;
+        const softSlWaitSec = autoConfig.softSlWaitSec || 30;
+
+        for (const pos of softWaiting) {
+          if (!acquireSellLock(pos.tokenMint)) continue;
+          try {
+            // Get live price via Jupiter quote
+            const { getQuote, SOL_MINT } = require('./trading');
+            const rawAmount = Math.floor(pos.remainingTokens * Math.pow(10, pos.decimals));
+            const quote = await getQuote(pos.tokenMint, SOL_MINT, rawAmount, 500);
+            const quoteSolOut = parseFloat(quote.outAmount) / 1e9;
+            const currentPrice = pos.remainingTokens > 0 ? quoteSolOut / pos.remainingTokens : 0;
+            const pnlPct = pos.entryPrice > 0 ? ((currentPrice - pos.entryPrice) / pos.entryPrice * 100) : 0;
+
+            // Layer 2: Hard SL — instant sell during soft wait
+            if (pnlPct <= -hardSlPct) {
+              console.log(`[SOFT-SL-FAST] ${pos.symbol}: HARD SL hit during soft wait (${pnlPct.toFixed(1)}% <= -${hardSlPct}%) — instant sell`);
+              await executeFullExit(pos, `HARD SL (during soft wait, ${pnlPct.toFixed(1)}%)`, 0, { lockHeld: true });
+              continue;
+            }
+
+            // Layer 1: Soft SL timer expired — sell if still below threshold
+            const elapsed = (Date.now() - pos.softSlTriggeredAt) / 1000;
+            if (elapsed >= softSlWaitSec && pnlPct <= -softSlPct) {
+              console.log(`[SOFT-SL-FAST] ${pos.symbol}: Soft SL timer expired (${elapsed.toFixed(0)}s >= ${softSlWaitSec}s, PNL ${pnlPct.toFixed(1)}%) — selling`);
+              await executeFullExit(pos, `Soft SL (fast-check, waited ${Math.round(elapsed)}s)`, 0, { lockHeld: true });
+              continue;
+            }
+
+            // Recovery: PNL recovered above soft SL
+            if (pnlPct > -softSlPct) {
+              if (isDryMode) dryRun.updateDryPosition(pos.tokenMint, { softSlTriggeredAt: null });
+              else { const { updatePosition } = require('./positions'); updatePosition(pos.tokenMint, { softSlTriggeredAt: null }); }
+              console.log(`[SOFT-SL-FAST] ${pos.symbol}: recovered (${pnlPct.toFixed(1)}% > -${softSlPct}%) — timer reset`);
+            }
+          } catch (e) {
+            // Jupiter quote failed — skip, main loop will handle NO_ROUTES
+            console.log(`[SOFT-SL-FAST] ${pos.symbol}: quote error (${e.message?.slice(0, 50)}), skipping`);
+          } finally {
+            releaseSellLock(pos.tokenMint);
+          }
+        }
+      }
+
+      // ── Part B: Liquidity drain fast-check (configurable) ──
+      if (autoConfig.liqDrainEnabled !== false) {
+        const liqCheckNow = Date.now();
+        const liqCheckInterval = (autoConfig.liqDrainCheckSec || 10) * 1000;
+        const liqExitPct = autoConfig.liqDrainExitPct || 50;
+        const liqWarnPct = autoConfig.liqDrainWarnPct || 30;
+        const liqMinLiq = autoConfig.liqDrainMinLiq || 1000;
+
+        for (const pos of allPos) {
+          const lastLiqCheck = pos._lastLiqCheck || 0;
+          if (liqCheckNow - lastLiqCheck < liqCheckInterval) continue;
+          if (!pos.gmgnSnapshot?.liquidity || pos.gmgnSnapshot.liquidity < liqMinLiq) continue;
+
+        if (!acquireSellLock(pos.tokenMint)) continue;
+        try {
+          // Mark check time immediately to avoid re-entry
+          if (isDryMode) dryRun.updateDryPosition(pos.tokenMint, { _lastLiqCheck: liqCheckNow });
+          else updatePosition(pos.tokenMint, { _lastLiqCheck: liqCheckNow });
+
+          const curData = await gmgnTokenInfo(pos.tokenMint);
+          const curLiq = parseFloat(curData?.pool?.liquidity || 0);
+          const entryLiq = pos.gmgnSnapshot.liquidity;
+
+          if (curLiq <= 0 || entryLiq <= 0) { releaseSellLock(pos.tokenMint); continue; }
+
+          const liqDrop = ((entryLiq - curLiq) / entryLiq) * 100;
+
+          if (liqDrop >= liqExitPct) {
+            console.log(`[LIQ-DRAIN] ${pos.symbol}: liquidity dropped ${liqDrop.toFixed(0)}% ($${Math.round(entryLiq)} → $${Math.round(curLiq)}) — instant exit`);
+            await executeFullExit(pos, `Liq Drain (-${liqDrop.toFixed(0)}%, $${Math.round(entryLiq)}→$${Math.round(curLiq)})`, 0, { lockHeld: true });
+          } else if (liqDrop >= liqWarnPct) {
+            // Warning at 30% — don't sell yet, but alert
+            console.log(`[LIQ-DRAIN] ${pos.symbol}: liquidity warning ${liqDrop.toFixed(0)}% drop ($${Math.round(entryLiq)} → $${Math.round(curLiq)})`);
+            if (!pos._liqWarnSent) {
+              if (isDryMode) dryRun.updateDryPosition(pos.tokenMint, { _liqWarnSent: true });
+              else updatePosition(pos.tokenMint, { _liqWarnSent: true });
+              sendTelegram(
+                `⚠️ <b>Liquidity Warning: ${pos.symbol}</b>\n\n` +
+                `💧 Liq: $${Math.round(entryLiq).toLocaleString()} → $${Math.round(curLiq).toLocaleString()} (-${liqDrop.toFixed(0)}%)\n` +
+                `🛑 Auto-exit if drops below ${liqExitPct}%`,
+                { parse_mode: 'HTML' }
+              ).catch(() => {});
+            }
+          }
+          releaseSellLock(pos.tokenMint);
+        } catch (e) {
+          releaseSellLock(pos.tokenMint);
+          console.log(`[LIQ-DRAIN] ${pos.symbol}: GMGN error (${e.message?.slice(0, 50)}), skipping`);
+        }
+      }
+      }
+    } catch (e) {
+      console.error('[DANGER-FAST] Loop error:', e.message);
+    } finally {
+      softSlRunning = false;
+    }
+    setTimeout(softSlTick, 3000);
+  }
+  setTimeout(softSlTick, 1500); // start after 1.5s (offset from bundler loop)
+
+  // Bundler fast loop (3s independent — catches bursts before dump)
+  async function bundlerTick() {
+    try { await checkBundlers(); }
+    catch (e) { console.error('[BUNDLER] Tick error:', e.message); }
+    setTimeout(bundlerTick, 3000);
+  }
+  setTimeout(bundlerTick, 1000); // start after 1s
 }
 
 // ─── Update Config (runtime + persist) ─────────────────
+function deepMerge(target, source) {
+  for (const key of Object.keys(source)) {
+    if (source[key] && typeof source[key] === 'object' && !Array.isArray(source[key]) &&
+        target[key] && typeof target[key] === 'object' && !Array.isArray(target[key])) {
+      deepMerge(target[key], source[key]);
+    } else {
+      target[key] = source[key];
+    }
+  }
+  return target;
+}
+
 function updateAutoConfig(updates) {
-  Object.assign(autoConfig, updates);
+  deepMerge(autoConfig, updates);
   saveAutoConfig();
   console.log('[AUTO] Config updated:', updates);
   return autoConfig;
@@ -1049,4 +1253,5 @@ module.exports = {
   setPartialSells, addPartialSell, removePartialSell, resetPartialSells,
   editPartialSell, disablePartialSell, enablePartialSell,
   isBuyLocked, getBuyLockRemaining, setBuyLock, getBuyLockStatus, setPostCloseLock,
+  acquireSellLock, releaseSellLock,
 };

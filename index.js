@@ -133,6 +133,10 @@ async function main() {
           const mc = token.market_cap || token.fdv || 0;
           const ageMin = token.created_timestamp ? (now - token.created_timestamp) / 60 : 0;
 
+          // Pre-calculate score for seen entry (even if rejected by filters)
+          const { score: earlyScore } = scoreToken(token, ageMin);
+          token._score = earlyScore;
+
           // Same filters as trending/trenches
           if (ageMin < CONFIG.minAgeMin || ageMin > CONFIG.maxAgeMin) return;
           if (mc < CONFIG.minMC || mc > CONFIG.maxMC) return;
@@ -190,6 +194,7 @@ async function main() {
     const now = Math.floor(Date.now() / 1000);
     const ageMin = token.created_timestamp ? (now - token.created_timestamp) / 60 : 0;
 
+    // Pre-calculate score for seen entry (even if rejected by filters)
     // Apply filters (same as trending/signal)
     if (ageMin > 0 && (ageMin < filters.minAgeMin || ageMin > filters.maxAgeMin)) return;
     if (mc > 0 && (mc < filters.minMC || mc > filters.maxMC)) return;

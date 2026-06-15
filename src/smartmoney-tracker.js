@@ -189,8 +189,10 @@ async function enrichToken(token) {
   token.entrapment_ratio = parseFloat(statData.top_entrapment_trader_percentage || 0);
   token.bundler_rate = parseFloat(statData.top_bundler_trader_percentage || 0);
   token.created_timestamp = d.creation_timestamp || 0;
-  token.price_change_percent5m = priceData.price_5m ? ((priceUsd - parseFloat(priceData.price_5m)) / parseFloat(priceData.price_5m) * 100) : 0;
-  token.price_change_percent1h = priceData.price_1h ? ((priceUsd - parseFloat(priceData.price_1h)) / parseFloat(priceData.price_1h) * 100) : 0;
+  const p5m = parseFloat(priceData.price_5m) || 0;
+  token.price_change_percent5m = p5m > 0 ? ((priceUsd - p5m) / p5m * 100) : 0;
+  const p1h = parseFloat(priceData.price_1h) || 0;
+  token.price_change_percent1h = p1h > 0 ? ((priceUsd - p1h) / p1h * 100) : 0;
 
   // Enrich socials
   if (linkData.twitter_username) token.twitter_username = linkData.twitter_username;
@@ -292,7 +294,7 @@ async function runTrackerScan(type, processToken) {
       // Skip tokens with no MC or liquidity after enrichment
       const mc = token.market_cap || token.fdv || 0;
       if (mc <= 0 || (token.liquidity || 0) <= 0) {
-        seen[addr] = { ts: Date.now(), wallets: group.wallets.size };
+        seen[addr] = { ts: Date.now(), wallets: group.wallets.size, symbol: token.symbol || '?', score: token._score || 0, price: token.price || 0, mc: 0, name: token.symbol || '?', vol: 0, holders: 0, phase: 2 };
         continue;
       }
 
@@ -304,7 +306,7 @@ async function runTrackerScan(type, processToken) {
       try {
         // Double-check global dedup right before processing (race condition fix)
         if (checkGlobalDedup(addr)) {
-          seen[addr] = { ts: Date.now(), wallets: group.wallets.size };
+          seen[addr] = { ts: Date.now(), wallets: group.wallets.size, symbol: token.symbol || '?', score: token._score || 0, price: token.price || 0, mc, name: token.symbol || '?', vol: token.volume_24h || token.volume || 0, holders: token.holder_count || 0, phase: 2 };
           saveSeen(seenFile, seen);
           continue;
         }
@@ -314,7 +316,7 @@ async function runTrackerScan(type, processToken) {
         console.error(`[TRACKER/${type}] Process ${token.symbol} failed: ${e.message}`);
       }
 
-      seen[addr] = { ts: Date.now(), wallets: group.wallets.size };
+      seen[addr] = { ts: Date.now(), wallets: group.wallets.size, symbol: token.symbol || '?', score: token._score || 0, price: token.price || 0, mc, name: token.symbol || '?', vol: token.volume_24h || token.volume || 0, holders: token.holder_count || 0, phase: 2, reasons: [] };
       setGlobalDedup(addr, type);  // shared with signal scanner
       saveSeen(seenFile, seen);  // save after each token (persist on restart)
     }

@@ -82,6 +82,7 @@ async function buyToken(tokenMint, solAmount, walletLabel = 'default', slippageB
 
   // Get quote — Jupiter handles routing automatically
   const quote = await getQuote(SOL_MINT, tokenMint, lamports, slippageBps);
+  if (!quote || !quote.outAmount) throw new Error('Empty quote');
   const outAmount = quote.outAmount;
   console.log(`[TRADE] Quote: ${outAmount} tokens (price impact: ${quote.priceImpactPct}%)`);
 
@@ -90,7 +91,7 @@ async function buyToken(tokenMint, solAmount, walletLabel = 'default', slippageB
   try {
     const info = await (require('./wallet').getTokenBalance)(tokenMint, walletLabel);
     if (info.decimals !== undefined && info.decimals >= 0) decimals = info.decimals;
-  } catch {}
+  } catch { console.warn(`[TRADE] Could not fetch decimals for ${tokenMint}, defaulting to 6`); }
 
   // Get swap transaction
   const swapResult = await getSwapTx(quote, keypair.publicKey);
@@ -112,9 +113,10 @@ async function buyToken(tokenMint, solAmount, walletLabel = 'default', slippageB
   console.log(`[TRADE] Confirmed: ${sig}`);
 
   // Check if TX actually succeeded on-chain
-  if (status && status.err) {
-    console.error(`[TRADE] TX FAILED on-chain: ${sig}`, JSON.stringify(status.err));
-    throw new Error(`TX failed on-chain: ${JSON.stringify(status.err)}`);
+  const err = status?.err || status?.value?.err;
+  if (err) {
+    console.error(`[TRADE] TX FAILED on-chain: ${sig}`, JSON.stringify(err));
+    throw new Error(`TX failed on-chain: ${JSON.stringify(err)}`);
   }
 
   // Double-check: fetch TX to verify no instruction errors
@@ -141,11 +143,12 @@ async function sellToken(tokenMint, tokenAmount, decimals, walletLabel = 'defaul
   const keypair = getKeypair(walletLabel);
   const conn = getConnection();
 
-  const rawAmount = Math.floor(tokenAmount * Math.pow(10, decimals));
+  const rawAmount = Math.round(tokenAmount * Math.pow(10, decimals));
   console.log(`[TRADE] Sell ${tokenAmount} of ${tokenMint} (slippage ${slippageBps/100}%)`);
 
   // Get quote — Jupiter handles routing automatically
   const quote = await getQuote(tokenMint, SOL_MINT, rawAmount, slippageBps);
+  if (!quote || !quote.outAmount) throw new Error('Empty quote');
   const solOut = parseFloat(quote.outAmount) / 1e9;
   console.log(`[TRADE] Quote: ${solOut} SOL (price impact: ${quote.priceImpactPct}%)`);
 
@@ -169,9 +172,10 @@ async function sellToken(tokenMint, tokenAmount, decimals, walletLabel = 'defaul
   console.log(`[TRADE] Confirmed: ${sig}`);
 
   // Check if TX actually succeeded on-chain
-  if (status && status.err) {
-    console.error(`[TRADE] Sell TX FAILED on-chain: ${sig}`, JSON.stringify(status.err));
-    throw new Error(`Sell TX failed on-chain: ${JSON.stringify(status.err)}`);
+  const err = status?.err || status?.value?.err;
+  if (err) {
+    console.error(`[TRADE] Sell TX FAILED on-chain: ${sig}`, JSON.stringify(err));
+    throw new Error(`Sell TX failed on-chain: ${JSON.stringify(err)}`);
   }
 
   // Double-check: fetch TX to verify no instruction errors

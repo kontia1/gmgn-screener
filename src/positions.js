@@ -24,9 +24,13 @@ function savePositions(positions) {
   fs.renameSync(tmpFile, POSITIONS_FILE);
 }
 
+// L27 FIX: validate that closed.json contains an array
 function loadClosed() {
-  try { return JSON.parse(fs.readFileSync(CLOSED_FILE, 'utf8')); }
-  catch { return []; }
+  try {
+    const parsed = JSON.parse(fs.readFileSync(CLOSED_FILE, 'utf8'));
+    if (!Array.isArray(parsed)) return [];
+    return parsed;
+  } catch { return []; }
 }
 
 function saveClosed(closed) {
@@ -37,9 +41,24 @@ function saveClosed(closed) {
   fs.renameSync(tmpFile, CLOSED_FILE);
 }
 
-// ─── Open Position ─────────────────────────────────────
+// ─── H5 FIX: Async mutex to prevent read-modify-write race conditions ──
+let _posLock = false;
+const _posQueue = [];
+async function withLock(fn) {
+  while (_posLock) await new Promise(r => _posQueue.push(r));
+  _posLock = true;
+  try { return await fn(); }
+  finally {
+    _posLock = false;
+    if (_posQueue.length) _posQueue.shift()();
+  }
+}
+
+// ─── Internal (unlocked) versions — used for nested calls to avoid deadlock ─
+
+// ─── Open Position (internal) ─────────────────────────────
 // partialSells: [{atPct: 50, sellPct: 25, sold: false}, ...]
-function openPosition(tokenMint, symbol, entryPrice, solSpent, tokenAmount, decimals, txSignature, opts = {}) {
+function _openPosition(tokenMint, symbol, entryPrice, solSpent, tokenAmount, decimals, txSignature, opts = {}) {
   const positions = loadPositions();
 
   // Don't overwrite existing position
@@ -95,8 +114,8 @@ function openPosition(tokenMint, symbol, entryPrice, solSpent, tokenAmount, deci
   return positions[tokenMint];
 }
 
-// ─── Record Partial Sell ───────────────────────────────
-function recordPartialSell(tokenMint, tokensSold, solReceived, txSignature, reason) {
+// ─── Record Partial Sell (internal) ───────────────────────────
+function _recordPartialSell(tokenMint, tokensSold, solReceived, txSignature, reason) {
   const positions = loadPositions();
   const pos = positions[tokenMint];
   if (!pos) return null;
@@ -114,15 +133,15 @@ function recordPartialSell(tokenMint, tokensSold, solReceived, txSignature, reas
   // If fully sold, save first (so totalSolReceived is persisted), then close with 0 additional
   if (pos.remainingTokens <= 0) {
     savePositions(positions);
-    return closePosition(tokenMint, 0, txSignature, reason);
+    return _closePosition(tokenMint, 0, txSignature, reason);  // uses internal version to avoid lock deadlock
   }
 
   savePositions(positions);
   return pos;
 }
 
-// ─── Close Position ────────────────────────────────────
-function closePosition(tokenMint, solReceived, txSignature, reason = 'manual') {
+// ─── Close Position (internal) ────────────────────────────────
+function _closePosition(tokenMint, solReceived, txSignature, reason = 'manual') {
   const positions = loadPositions();
   const pos = positions[tokenMint];
   if (!pos) throw new Error(`No open position for ${tokenMint}`);
@@ -154,14 +173,90 @@ function closePosition(tokenMint, solReceived, txSignature, reason = 'manual') {
   return closed;
 }
 
-// ─── Update Position ───────────────────────────────────
-function updatePosition(tokenMint, updates) {
+// ─── Update Position (internal) ───────────────────────────────
+function _updatePosition(tokenMint, updates) {
   const positions = loadPositions();
   if (!positions[tokenMint]) return null;
   Object.assign(positions[tokenMint], updates);
   savePositions(positions);
   return positions[tokenMint];
 }
+
+// ─── Check Trailing TP + Partial Sells + SL (internal) ────────
+// M225 FIX: batch peak update — load once, mutate peak in-memory, save once at end
+function _checkTpSl(pos, currentPrice) {
+  const pnl = calcPnl(pos, currentPrice);
+  const actions = [];
+  let peakDirty = false;
+
+  // Update peak price in-memory (no full load+save cycle)
+  if (currentPrice > (pos.peakPrice || 0)) {
+    pos.peakPrice = currentPrice;
+    pos.peakPnlPct = pnl.pnlPct;
+    peakDirty = true;
+  }
+
+  // 1. Check partial sell levels (skip disabled ones with sellPct=0)
+  const pendingPartials = (pos.partialSells || []).filter(s => !s.sold && s.enabled !== false);
+  for (const partial of pendingPartials) {
+    if (pnl.pnlPct >= partial.atPct) {
+      actions.push({ type: 'partial', atPct: partial.atPct, sellPct: partial.sellPct });
+    }
+  }
+
+  // 2. Check trailing TP (only after peak drops by trailingDropPct)
+  if (pos.trailingEnabled && pos.peakPrice) {
+    const dropFromPeak = ((pos.peakPrice - currentPrice) / pos.peakPrice * 100);
+    const peakPnl = pos.peakPnlPct || 0;
+
+    // Only trigger trailing if we've been in profit and now dropping
+    const triggerPct = pos.trailingTriggerPct || 20;
+    if (peakPnl > triggerPct && dropFromPeak >= (pos.trailingDropPct || 15)) {
+      actions.push({ type: 'trailing', dropFromPeak: dropFromPeak.toFixed(1), peakPnl });
+    }
+  }
+
+  // 3. Check hard SL (always on remaining position)
+  if (pnl.pnlPct <= -(pos.slPct || 50)) {
+    actions.push({ type: 'sl' });
+  }
+
+  // M225 FIX: single save for peak update if dirty
+  if (peakDirty) {
+    const positions = loadPositions();
+    if (positions[pos.tokenMint]) {
+      positions[pos.tokenMint].peakPrice = pos.peakPrice;
+      positions[pos.tokenMint].peakPnlPct = pos.peakPnlPct;
+      savePositions(positions);
+    }
+  }
+
+  return { actions, ...pnl };
+}
+
+// ─── Public locked wrappers (transparent to callers) ───────────
+
+function openPosition(tokenMint, symbol, entryPrice, solSpent, tokenAmount, decimals, txSignature, opts) {
+  return withLock(() => _openPosition(tokenMint, symbol, entryPrice, solSpent, tokenAmount, decimals, txSignature, opts));
+}
+
+function recordPartialSell(tokenMint, tokensSold, solReceived, txSignature, reason) {
+  return withLock(() => _recordPartialSell(tokenMint, tokensSold, solReceived, txSignature, reason));
+}
+
+function closePosition(tokenMint, solReceived, txSignature, reason) {
+  return withLock(() => _closePosition(tokenMint, solReceived, txSignature, reason));
+}
+
+function updatePosition(tokenMint, updates) {
+  return withLock(() => _updatePosition(tokenMint, updates));
+}
+
+function checkTpSl(pos, currentPrice) {
+  return withLock(() => _checkTpSl(pos, currentPrice));
+}
+
+// ─── Read-only helpers (no lock needed) ────────────────────────
 
 // ─── Get Position ──────────────────────────────────────
 function getPosition(tokenMint) {
@@ -213,48 +308,6 @@ function calcPnl(pos, currentPrice) {
     remainingTokens: pos.remainingTokens,
     totalSolReceived: pos.totalSolReceived,
   };
-}
-
-// ─── Check Trailing TP + Partial Sells + SL ────────────
-// Returns: { actions: ['partial_50', 'trailing', 'sl', 'hold'], pnl, partials, ... }
-function checkTpSl(pos, currentPrice) {
-  const pnl = calcPnl(pos, currentPrice);
-  const actions = [];
-
-  // Update peak price
-  if (currentPrice > (pos.peakPrice || 0)) {
-    updatePosition(pos.tokenMint, {
-      peakPrice: currentPrice,
-      peakPnlPct: pnl.pnlPct,
-    });
-  }
-
-  // 1. Check partial sell levels (skip disabled ones with sellPct=0)
-  const pendingPartials = (pos.partialSells || []).filter(s => !s.sold && s.enabled !== false);
-  for (const partial of pendingPartials) {
-    if (pnl.pnlPct >= partial.atPct) {
-      actions.push({ type: 'partial', atPct: partial.atPct, sellPct: partial.sellPct });
-    }
-  }
-
-  // 2. Check trailing TP (only after peak drops by trailingDropPct)
-  if (pos.trailingEnabled && pos.peakPrice) {
-    const dropFromPeak = ((pos.peakPrice - currentPrice) / pos.peakPrice * 100);
-    const peakPnl = pos.peakPnlPct || 0;
-
-    // Only trigger trailing if we've been in profit and now dropping
-    const triggerPct = pos.trailingTriggerPct || 20;
-    if (peakPnl > triggerPct && dropFromPeak >= (pos.trailingDropPct || 15)) {
-      actions.push({ type: 'trailing', dropFromPeak: dropFromPeak.toFixed(1), peakPnl });
-    }
-  }
-
-  // 3. Check hard SL (always on remaining position)
-  if (pnl.pnlPct <= -(pos.slPct || 50)) {
-    actions.push({ type: 'sl' });
-  }
-
-  return { actions, ...pnl };
 }
 
 module.exports = {

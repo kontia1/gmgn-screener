@@ -54,12 +54,11 @@ const MENU = {
 
   // Position action buttons
   position: (mint) => {
-    const s = mint.slice(0, 8);
     return [
-      [{ text: '💸 25%', callback_data: `sell_25_${s}` },
-       { text: '💸 50%', callback_data: `sell_50_${s}` },
-       { text: '💸 100%', callback_data: `sell_100_${s}` }],
-      [{ text: '🔄 Refresh', callback_data: `refresh_${s}` },
+      [{ text: '💸 25%', callback_data: `sell_25_${mint}` },
+       { text: '💸 50%', callback_data: `sell_50_${mint}` },
+       { text: '💸 100%', callback_data: `sell_100_${mint}` }],
+      [{ text: '🔄 Refresh', callback_data: `refresh_${mint}` },
        { text: '📊 GMGN', url: `https://gmgn.ai/sol/token/${mint}` }],
       [{ text: '📋 Positions', callback_data: 'menu_positions' },
        { text: '🏠 Menu', callback_data: 'menu_main' }],
@@ -73,14 +72,14 @@ const MENU = {
     [{ text: `🟡 Soft SL: -${cfg.softSlPct || 15}%`, callback_data: 'cfg_input_softSlPct' },
      { text: `⏱ Wait: ${cfg.softSlWaitSec || 30}s`, callback_data: 'cfg_input_softSlWaitSec' }],
     [{ text: `🛑 Hard SL: -${cfg.hardSlPct || cfg.slPct || 40}%`, callback_data: 'cfg_input_hardSlPct' },
-     { text: `📉 Trail: ${cfg.trailingDropPct}%`, callback_data: 'cfg_input_trailingDropPct' }],
+     { text: `📉 Trail: ${cfg.trailingDropPct ?? 15}%`, callback_data: 'cfg_input_trailingDropPct' }],
     [{ text: `🎯 Trigger: +${cfg.trailingTriggerPct || 20}%`, callback_data: 'cfg_input_trailingTriggerPct' }],
-    [{ text: `📊 Score: ${cfg.minScore}`, callback_data: 'cfg_input_minScore' },
-     { text: `📦 Max: ${cfg.maxOpenPositions}`, callback_data: 'cfg_input_maxOpenPositions' }],
-    [{ text: `⏱ Check: ${cfg.checkIntervalSec}s`, callback_data: 'cfg_input_checkIntervalSec' },
+    [{ text: `📊 Score: ${cfg.minScore ?? 40}`, callback_data: 'cfg_input_minScore' },
+     { text: `📦 Max: ${cfg.maxOpenPositions ?? 10}`, callback_data: 'cfg_input_maxOpenPositions' }],
+    [{ text: `⏱ Check: ${cfg.checkIntervalSec ?? 5}s`, callback_data: 'cfg_input_checkIntervalSec' },
      { text: `🔍 Scan: ${cfg.scanIntervalSec || ((cfg.scanIntervalMin || 10) * 60)}s`, callback_data: 'cfg_input_scanIntervalSec' }],
-    [{ text: `💰 Buy: ${cfg.buyAmountSol} SOL`, callback_data: 'cfg_input_buyAmountSol' },
-     { text: `📈 Slip: ${cfg.slippageBps / 100}%`, callback_data: 'cfg_input_slippageBps' }],
+    [{ text: `💰 Buy: ${cfg.buyAmountSol ?? 0.015} SOL`, callback_data: 'cfg_input_buyAmountSol' },
+     { text: `📈 Slip: ${(cfg.slippageBps ?? 500) / 100}%`, callback_data: 'cfg_input_slippageBps' }],
     // Partial sells
     [{ text: '🎯 Partial Sells', callback_data: 'noop' }],
     ...((cfg.partialSells || []).map((s, i) => {
@@ -139,6 +138,12 @@ const MENU = {
     [{ text: '🔒 Buy Lock', callback_data: 'noop' }],
     [{ text: `${cfg.buyLock?.enabled !== false ? '✅ Lock ON' : '❌ Lock OFF'}`, callback_data: 'cfg_buylock_toggle' },
      { text: `⏱ ${cfg.buyLock?.ttlSec || 300}s`, callback_data: 'cfg_buylock_ttl' }],
+    // Liquidity Drain
+    [{ text: '💧 Liq Drain', callback_data: 'noop' }],
+    [{ text: `${cfg.liqDrainEnabled !== false ? '✅ Liq ON' : '❌ Liq OFF'}`, callback_data: 'cfg_liq_toggle' },
+     { text: `Exit: -${cfg.liqDrainExitPct || 50}%`, callback_data: 'cfg_input_liqDrainExitPct' }],
+    [{ text: `⚠ Warn: -${cfg.liqDrainWarnPct || 30}%`, callback_data: 'cfg_input_liqDrainWarnPct' },
+     { text: `⏱ ${cfg.liqDrainCheckSec || 10}s`, callback_data: 'cfg_input_liqDrainCheckSec' }],
     [{ text: '🔙 Back', callback_data: 'menu_main' }],
   ],
 
@@ -157,6 +162,10 @@ const MENU = {
     scanIntervalMin: { label: 'Scan Interval (min)', hint: 'e.g. 10', min: 1, max: 60 },
     buyAmountSol: { label: 'Buy Amount (SOL)', hint: 'e.g. 0.015', min: 0.001, max: 10 },
     slippageBps: { label: 'Slippage (bps)', hint: 'e.g. 500 (=5%)', min: 50, max: 5000 },
+    liqDrainExitPct: { label: 'Liq Drain Exit %', hint: 'e.g. 50 (instant exit)', min: 10, max: 90 },
+    liqDrainWarnPct: { label: 'Liq Drain Warn %', hint: 'e.g. 30 (warning only)', min: 5, max: 80 },
+    liqDrainCheckSec: { label: 'Liq Check Interval (sec)', hint: 'e.g. 10', min: 3, max: 60 },
+    liqDrainMinLiq: { label: 'Min Entry Liq ($)', hint: 'e.g. 1000', min: 0, max: 100000 },
   },
 
   // Partial sell labels (dynamic by level)
@@ -213,20 +222,19 @@ const MENU = {
 
   // Screener alert buttons
   alert: (mint) => [
-    [{ text: '🛒 Buy 0.015', callback_data: `buy_0.015_${mint.slice(0, 8)}` },
-     { text: '🛒 Buy 0.05', callback_data: `buy_0.05_${mint.slice(0, 8)}` }],
+    [{ text: '🛒 Buy 0.015', callback_data: `buy_0.015_${mint}` },
+     { text: '🛒 Buy 0.05', callback_data: `buy_0.05_${mint}` }],
     [{ text: '📊 GMGN', url: `https://gmgn.ai/sol/token/${mint}` },
      { text: '📈 Birdeye', url: `https://birdeye.so/token/${mint}?chain=solana` }],
   ],
 
   // Auto-buy notification buttons
   autoBuy: (mint) => {
-    const s = mint.slice(0, 8);
     return [
-      [{ text: '📊 Position', callback_data: `refresh_${s}` },
-       { text: '💸 Sell All', callback_data: `sell_100_${s}` }],
-      [{ text: '💸 Sell 25%', callback_data: `sell_25_${s}` },
-       { text: '💸 Sell 50%', callback_data: `sell_50_${s}` }],
+      [{ text: '📊 Position', callback_data: `refresh_${mint}` },
+       { text: '💸 Sell All', callback_data: `sell_100_${mint}` }],
+      [{ text: '💸 Sell 25%', callback_data: `sell_25_${mint}` },
+       { text: '💸 Sell 50%', callback_data: `sell_50_${mint}` }],
     ];
   },
 };
@@ -264,6 +272,12 @@ async function handleCallbackQuery(cq) {
   const msgId = cq.message?.message_id;
 
   if (!chatId || !data) return;
+  // Check authorization
+  const ALLOWED_CHAT_IDS = (process.env.ALLOWED_CHAT_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
+  if (ALLOWED_CHAT_IDS.length && !ALLOWED_CHAT_IDS.includes(String(chatId))) {
+    console.log(`[BTN] Blocked callback from unauthorized chat ${chatId}`);
+    return;
+  }
   await tgApi('answerCallbackQuery', { callback_query_id: queryId });
   console.log(`[BTN] ${data} from ${chatId}`);
 
@@ -535,6 +549,15 @@ async function handleCallbackQuery(cq) {
       reply_markup: { inline_keyboard: [[{ text: '❌ Cancel', callback_data: 'menu_config' }]] },
     });
   }
+
+  // ── Liquidity Drain handlers ──
+  if (data === 'cfg_liq_toggle') {
+    const { updateAutoConfig, getAutoConfig } = require('../src/autotrade');
+    const cfg = getAutoConfig();
+    const current = cfg.liqDrainEnabled !== false;
+    updateAutoConfig({ liqDrainEnabled: !current });
+    return sendConfigMenu(chatId);
+  }
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -726,11 +749,11 @@ async function sendMainMenu(chatId) {
   const lines = [
     cfg.mode === 'dry_run' ? `🟡 <b>GMGN Screener — DRY RUN</b>` : `🤖 <b>GMGN Screener + Trader</b>`,
     ``,
-    `📊 Positions: ${open.length}/${cfg.maxOpenPositions}`,
+    `📊 Positions: ${open.length}/${cfg.maxOpenPositions ?? 10}`,
     `🤖 Auto-Trade: ${cfg.enabled ? '✅ ON' : '❌ OFF'}`,
     cfg.mode === 'dry_run' ? `🟡 Mode: DRY RUN (no real trades)` : null,
-    `💰 Buy: ${cfg.buyAmountSol} SOL | 🟡 Soft SL: -${cfg.softSlPct || 15}%/${cfg.softSlWaitSec || 30}s | 🛑 Hard SL: -${cfg.hardSlPct || cfg.slPct || 40}%`,
-    `📉 Trail: ${cfg.trailingDropPct}% | 📊 Score: ${cfg.minScore}`,
+    `💰 Buy: ${cfg.buyAmountSol ?? 0.015} SOL | 🟡 Soft SL: -${cfg.softSlPct || 15}%/${cfg.softSlWaitSec || 30}s | 🛑 Hard SL: -${cfg.hardSlPct || cfg.slPct || 40}%`,
+    `📉 Trail: ${cfg.trailingDropPct ?? 15}% | 📊 Score: ${cfg.minScore ?? 40}`,
     `📡 Source: ${cfg.screenerSource === 'trenches' ? '⛏️ Trenches' : cfg.screenerSource === 'signal' ? '📡 Signal' : '🔥 Trending'}`,
     ``,
     `Select option:`,
@@ -867,16 +890,16 @@ async function sendConfigMenu(chatId) {
       ``,
       `🤖 Auto-Trade: ${cfg.enabled ? '✅ ON' : '❌ OFF'}`,
       `🔄 Mode: ${cfg.mode === 'dry_run' ? '🟡 DRY RUN' : '🟢 LIVE'}`,
-      `💰 Buy: ${cfg.buyAmountSol} SOL`,
+      `💰 Buy: ${cfg.buyAmountSol ?? 0.015} SOL`,
       `🟡 Soft SL: -${cfg.softSlPct || 15}%/${cfg.softSlWaitSec || 30}s`,
       `🛑 Hard SL: -${cfg.hardSlPct || cfg.slPct || 40}%`,
-      `📉 Trail: ${cfg.trailingDropPct}%`,
+      `📉 Trail: ${cfg.trailingDropPct ?? 15}%`,
       `🎯 Trigger: +${cfg.trailingTriggerPct || 20}%`,
-      `📊 Score: ${cfg.minScore}`,
-      `📦 Max: ${cfg.maxOpenPositions}`,
-      `⏱ Check: ${cfg.checkIntervalSec}s`,
+      `📊 Score: ${cfg.minScore ?? 40}`,
+      `📦 Max: ${cfg.maxOpenPositions ?? 10}`,
+      `⏱ Check: ${cfg.checkIntervalSec ?? 5}s`,
       `🔍 Scan: ${cfg.scanIntervalSec || ((cfg.scanIntervalMin || 10) * 60)}s`,
-      `📈 Slippage: ${cfg.slippageBps / 100}%`,
+      `📈 Slippage: ${(cfg.slippageBps ?? 500) / 100}%`,
       ``,
       `🎯 Partial Sells:`,
       ...psLines,
@@ -1069,8 +1092,13 @@ async function handleCloseRugs(chatId) {
     await new Promise(r => setTimeout(r, 2000));
   }
 
-  // 2. Check open positions for rugs
+  // 2. Check open positions for rugs (with sell lock)
+  const { acquireSellLock, releaseSellLock } = require('../src/autotrade');
   for (const pos of open) {
+    if (!acquireSellLock(pos.tokenMint)) {
+      skipped.push({ symbol: pos.symbol, reason: 'sell lock held (auto-trade active)' });
+      continue;
+    }
     const rawAmount = Math.floor(pos.remainingTokens * Math.pow(10, pos.decimals));
     try {
       const quote = await getQuote(pos.tokenMint, SOL_MINT, rawAmount, 500);
@@ -1085,15 +1113,24 @@ async function handleCloseRugs(chatId) {
           positions.closePosition(pos.tokenMint, recovered, result.signature || 'none', 'rug_scan');
           require('./autotrade').setPostCloseLock(pos.tokenMint);
           sold.push({ symbol: pos.symbol, recovered, source: 'position' });
-        } catch {
-          positions.closePosition(pos.tokenMint, 0, 'none', 'rug_scan');
-          require('./autotrade').setPostCloseLock(pos.tokenMint);
-          sold.push({ symbol: pos.symbol, recovered: 0, source: 'position (sell failed)' });
+        } catch (sellErr) {
+          const sellMsg = sellErr.message || '';
+          if (sellMsg.includes('NO_ROUTES_FOUND') || sellMsg.includes('No routes found')) {
+            console.warn(`[BTN] ${pos.symbol}: sell failed with NO_ROUTES, closing anyway`);
+            positions.closePosition(pos.tokenMint, 0, 'none', 'rug_scan');
+            require('./autotrade').setPostCloseLock(pos.tokenMint);
+            sold.push({ symbol: pos.symbol, recovered: 0, source: 'position (no routes)' });
+          } else {
+            console.error(`[BTN] ${pos.symbol}: sell failed (${sellMsg.slice(0, 60)}), NOT closing`);
+            errors.push({ symbol: pos.symbol, error: `sell failed: ${sellMsg.slice(0, 60)}` });
+          }
         }
       } else {
         skipped.push({ symbol: pos.symbol, reason: `PNL ${pnlPct.toFixed(1)}% (healthy)` });
       }
+      releaseSellLock(pos.tokenMint);
     } catch (e) {
+      releaseSellLock(pos.tokenMint);
       const msg = e.message || '';
       if (msg.includes('NO_ROUTES_FOUND') || msg.includes('No routes found')) {
         positions.closePosition(pos.tokenMint, 0, 'none', 'rug_scan_dead');
@@ -1488,7 +1525,7 @@ async function cfgFilterPromptInput(chatId, filterKey) {
 
   // Special display for rate fields
   let displayVal = current;
-  if (filterKey === 'maxBundlerRate' || filterKey === 'maxTop10HolderRate') {
+  if (filterKey === 'maxBundlerRate' || filterKey === 'maxTop10HolderRate' || filterKey === 'maxEntrapment') {
     displayVal = `${(current * 100).toFixed(0)}%`;
   }
 
@@ -1678,7 +1715,7 @@ async function cfgSignalWeightPromptInput(chatId, typeId) {
 
   // Quick-set buttons: positive range and negative range
   const buttons = [];
-  if (typeId !== '18') {
+  if (typeId !== 18) {
     // Positive quick set
     buttons.push([
       { text: '+3', callback_data: `cfg_signal_wset_${typeId}_3` },

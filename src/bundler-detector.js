@@ -146,7 +146,7 @@ async function checkBundlerPattern(tokenMint, tokenSupply = 0, symbol = 'Unknown
   }
 
   try {
-    const url = `${HELIUS_BASE}/addresses/${tokenMint}/transactions?api-key=${HELIUS_API_KEY}&limit=50`;
+    const url = `${HELIUS_BASE}/addresses/${tokenMint}/transactions?api-key=${HELIUS_API_KEY}&limit=15`;
     const resp = await fetch(url);
     if (!resp.ok) {
       return { isBundler: false, hasHistory: false, details: 'API error', transfers: 0, uniquePayers: 0 };
@@ -190,35 +190,35 @@ async function checkBundlerPattern(tokenMint, tokenSupply = 0, symbol = 'Unknown
     let burstPosition = 'first_50';
     let wouldPaginationHelp = false;
 
-    if (transfers.length === 50) {
+    if (transfers.length >= 13) {
       const oldest = transfers[transfers.length - 1].timestamp || 0;
       const newest = transfers[0].timestamp || 0;
       const spanSeconds = newest - oldest;
       
-      // Count unique payers for 50-tx burst
+      // Count unique payers for burst
       const burstPayers = new Set(transfers.map(tx => tx.feePayer || ''));
       
       // Only flag if few payers (real bundler = 1-3 wallets doing many transfers)
       // 10+ payers = organic launch rush, not bundler
-      if (spanSeconds < 60 && burstPayers.size <= 5) {
+      if (spanSeconds < 30 && burstPayers.size <= 2) {
         isBundler = true;
-        reasons.push(`50 transactions in ${spanSeconds} seconds from ${burstPayers.size} payers`);
-        burstPosition = 'first_50';
+        reasons.push(`${transfers.length} transactions in ${spanSeconds} seconds from ${burstPayers.size} payers`);
+        burstPosition = 'first_15';
         wouldPaginationHelp = false;
       }
     }
 
-    // ─── ACTIVE WINDOW: last 30 seconds ───
-    const activeWindow = 30;
+    // ─── ACTIVE WINDOW: last 10 seconds (fast detection) ───
+    const activeWindow = 10;
     const activeTransfers = transfers.filter(tx => {
       const ts = tx.timestamp || 0;
       return (now - ts) < activeWindow;
     });
 
-    // ─── HISTORICAL WINDOW: 30s to 10min ago ───
+    // ─── HISTORICAL WINDOW: 10s to 5min ago ───
     const historyTransfers = transfers.filter(tx => {
       const ts = tx.timestamp || 0;
-      return (now - ts) >= activeWindow && (now - ts) < 600;
+      return (now - ts) >= activeWindow && (now - ts) < 300;
     });
 
     // ─── Analyze ACTIVE transfers ───
@@ -257,22 +257,22 @@ async function checkBundlerPattern(tokenMint, tokenSupply = 0, symbol = 'Unknown
         }
       }
 
-      // Rule 1: Many transfers, few payers — stricter for new tokens
-      if (activeTransfers.length >= 20 && activePayers.size <= 2) {
+      // Rule 1: Many transfers, few payers — fast bundler detection
+      if (activeTransfers.length >= 12 && activePayers.size <= 2) {
         reasons.push(`${activeTransfers.length} transfers from ${activePayers.size} payers in ${activeWindow}s`);
         isBundler = true;
       }
 
-      // Rule 2: Burst in < 5 seconds — only if few payers (real bundler = 1-2 wallets doing many transfers)
+      // Rule 2: Burst in < 2 seconds — tight timing = bundler
       const timestamps = activeTransfers.map(tx => tx.timestamp || 0).sort();
       let burstCount = 0;
       for (let i = 1; i < timestamps.length; i++) {
-        if (timestamps[i] - timestamps[i-1] < 5) {
+        if (timestamps[i] - timestamps[i-1] < 2) {
           burstCount++;
         }
       }
-      if (burstCount >= 15 && activePayers.size <= 3) {
-        reasons.push(`${burstCount} transfers within 5 seconds from ${activePayers.size} payers`);
+      if (burstCount >= 5 && activePayers.size <= 2) {
+        reasons.push(`${burstCount} transfers within 2 seconds from ${activePayers.size} payers`);
         isBundler = true;
       }
 
@@ -309,7 +309,7 @@ async function checkBundlerPattern(tokenMint, tokenSupply = 0, symbol = 'Unknown
       for (const tx of historyTransfers) {
         historyPayers.add(tx.feePayer || '');
       }
-      if (historyTransfers.length >= 10 && historyPayers.size <= 3) {
+      if (historyTransfers.length >= 10 && historyPayers.size <= 2) {
         hasHistory = true;
       }
     }

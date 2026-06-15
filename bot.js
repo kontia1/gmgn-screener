@@ -38,12 +38,29 @@ const ALLOWED_CHAT_IDS = (process.env.ALLOWED_CHAT_IDS || '')
   .split(',').map(s => s.trim()).filter(Boolean);
 
 function isAllowed(chatId) {
-  if (!ALLOWED_CHAT_IDS.length) return true;
+  if (!ALLOWED_CHAT_IDS.length) {
+    console.warn('[BOT] WARNING: No ALLOWED_CHAT_IDS set — bot accepts messages from ALL chats');
+    return true;
+  }
   return ALLOWED_CHAT_IDS.includes(String(chatId));
 }
 
 function loadSeen() {
-  try { return JSON.parse(fs.readFileSync(getSeenFile(), 'utf8')); } catch { return {}; }
+  const merged = {};
+  const sources = ['trending', 'trenches', 'signal', 'sm', 'kol'];
+  for (const src of sources) {
+    try {
+      const file = path.join(SEEN_DIR, `gmgn-seen-${src}.json`);
+      const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+      // Merge — prefer entry with more data (has symbol+score)
+      for (const [k, v] of Object.entries(data)) {
+        if (!merged[k] || (v.symbol && v.symbol !== '?' && (!merged[k].symbol || merged[k].symbol === '?'))) {
+          merged[k] = v;
+        }
+      }
+    } catch {}
+  }
+  return merged;
 }
 
 // Wrapper: per-token timeout (max 6s per token)
