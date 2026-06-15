@@ -992,7 +992,15 @@ async function checkBundlers() {
           sendTelegram(bundlerMsg, { parse_mode: 'HTML' }).catch(() => {});
 
           if (isDry) {
-            const closed = dryRun.closeDryPosition(pos.tokenMint, 0, 'bundler_detected');
+            // Get quote for accurate PNL in dry run
+            let bundlerQuoteSol = 0;
+            try {
+              const { getQuote: bqGetQuote, SOL_MINT: bqSol } = require('./trading');
+              const bqRaw = Math.floor(pos.remainingTokens * Math.pow(10, pos.decimals));
+              const bqQuote = await bqGetQuote(pos.tokenMint, bqSol, bqRaw, 500);
+              bundlerQuoteSol = parseFloat(bqQuote.outAmount) / 1e9;
+            } catch (_) {}
+            const closed = dryRun.closeDryPosition(pos.tokenMint, bundlerQuoteSol, 'bundler_detected');
             setPostCloseLock(pos.tokenMint);
             await sendTelegram(`🟡 <b>DRY RUN — Auto-Sell (Bundler): ${pos.symbol}</b>\n\n📊 PNL: ${closed.pnl >= 0 ? '+' : ''}${closed.pnl.toFixed(4)} SOL (${closed.pnlPct}%)`);
           } else {
