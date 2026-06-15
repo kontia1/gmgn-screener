@@ -4,6 +4,75 @@ Solana token screener with automated trading, rug protection, smart money tracki
 
 ---
 
+## Quick Start
+
+```bash
+# 1. Clone repository
+git clone https://github.com/kontia1/gmgn-screener.git
+cd gmgn-screener
+
+# 2. Install dependencies
+npm install
+
+# 3. Install gmgn-cli globally
+npm install -g gmgn-cli
+
+# 4. Configure gmgn-cli with your API key
+gmgn-cli config set api_key YOUR_GMGN_API_KEY
+
+# 5. Create .env from example
+cp .env.example .env
+# Edit .env with your credentials (see Environment Variables below)
+
+# 6. Import wallet via Telegram bot
+#    Send /wallet import <your_base58_private_key> to your bot
+
+# 7. Run
+node index.js
+```
+
+---
+
+## Running in Background
+
+### Option A: Screen
+
+```bash
+screen -dmS gmgn node index.js   # Start detached
+screen -r gmgn                    # View live output
+# Detach: Ctrl+A then D
+screen -ls                        # Check if running
+screen -S gmgn -X quit           # Stop
+```
+
+### Option B: Systemd (auto-restart, auto-start on boot)
+
+```bash
+sudo cp gmgn-screener.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable gmgn-screener
+sudo systemctl start gmgn-screener
+```
+
+---
+
+## Environment Variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `SOLANA_RPC_URL` | Yes | Solana RPC endpoint (Helius recommended) |
+| `HELIUS_API_KEY` | Yes | Helius API key (for bundler detection) |
+| `JUPITER_API_URL` | No | Jupiter API URL (default: `https://api.jup.ag/swap/v1`) |
+| `JUPITER_API_KEY` | No | Jupiter API key for premium routing |
+| `BOT_TOKEN` | Yes | Telegram bot token from @BotFather |
+| `BOT_USERNAME` | No | Telegram bot username (for inline links) |
+| `CHAT_ID` | Yes | Your Telegram chat ID |
+| `GMGN_API_KEY` | Yes | GMGN API key (`x-apikey` header) |
+| `WALLET_PRIVATE_KEY` | No | Base58 private key (alternative to `/wallet import`) |
+| `ALLOWED_CHAT_IDS` | No | Comma-separated chat IDs (empty = allow all) |
+
+---
+
 ## Features
 
 ### 1. Dual Token Screener (Trending + Trenches)
@@ -327,115 +396,6 @@ All trading parameters editable in real-time via Telegram.
 | Scan Interval | 30s | 10-3600 | Screener scan frequency (seconds) |
 | Slippage | 500 bps | 10-5000 | Swap slippage tolerance |
 | Buy Lock | 120s | 0-600 | Cooldown per CA (source-agnostic) |
-
----
-
-## Additional Systems
-
-### Position Monitor
-- Checks all open positions every 10s (configurable 10-3600s)
-- 2s delay between position checks (anti rate-limit)
-- Jupiter quotes for accurate PNL + live liquidity tracking
-- Dead token auto-close after 3 consecutive quote failures
-- Wallet empty auto-close (balance = 0 → close all positions)
-
-### Bundler Detection (Screening)
-- Scans token launch transactions for bundled patterns
-- Rejects bundled tokens during screening (score penalty: -15)
-- Integrated into 4-layer buy protection (Layer 1)
-
-### Wallet Management
-- Import existing wallet (base58 private key)
-- Create new wallet
-- List, remove, and switch between wallets
-- Close rugged/dead token accounts (recovers ~0.002 SOL rent each)
-- Close empty accounts with one-click batch close
-- Supports both SPL Token and Token-2022 programs
-
-### Jupiter V6 Integration
-- Best-route swap across all Solana DEXes
-- API key support for premium routing
-- Automatic retry on 429 rate limits (3x with exponential backoff)
-- Buy (SOL → Token), Sell (Token → SOL), Partial sell, Close operations
-
-### Rate Limit Safety
-- Position check formula: `maxPos × delay ≤ checkInterval`
-- Automatic 429 retry with exponential backoff (2s → 4s → 8s)
-- API limits: Jupiter ~2 req/s, GMGN ~1 req/s, Helius 100 req/s
-
-### Analytics Logging
-- Tracks buy/reject decisions per source
-- Logs token symbol, address, source, score, decision reason, price, MC, age
-- 7-day auto-cleanup
-
----
-
-## Quick Start
-
-```bash
-# 1. Clone repository
-git clone https://github.com/kontia1/gmgn-screener.git
-cd gmgn-screener
-
-# 2. Install dependencies
-npm install
-
-# 3. Install gmgn-cli globally
-npm install -g gmgn-cli
-
-# 4. Configure gmgn-cli with your API key
-gmgn-cli config set api_key YOUR_GMGN_API_KEY
-
-# 5. Create .env from example
-cp .env.example .env
-# Edit .env with your credentials (see Environment Variables below)
-
-# 6. Import wallet via Telegram bot
-#    Send /wallet import <your_base58_private_key> to your bot
-
-# 7. Run
-node index.js
-```
-
----
-
-## Running in Background
-
-### Option A: Screen
-
-```bash
-screen -dmS gmgn node index.js   # Start detached
-screen -r gmgn                    # View live output
-# Detach: Ctrl+A then D
-screen -ls                        # Check if running
-screen -S gmgn -X quit           # Stop
-```
-
-### Option B: Systemd (auto-restart, auto-start on boot)
-
-```bash
-sudo cp gmgn-screener.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable gmgn-screener
-sudo systemctl start gmgn-screener
-```
-
----
-
-## Environment Variables
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `SOLANA_RPC_URL` | Yes | Solana RPC endpoint (Helius recommended) |
-| `HELIUS_API_KEY` | Yes | Helius API key (for bundler detection) |
-| `JUPITER_API_URL` | No | Jupiter API URL (default: `https://api.jup.ag/swap/v1`) |
-| `JUPITER_API_KEY` | No | Jupiter API key for premium routing |
-| `BOT_TOKEN` | Yes | Telegram bot token from @BotFather |
-| `BOT_USERNAME` | No | Telegram bot username (for inline links) |
-| `CHAT_ID` | Yes | Your Telegram chat ID |
-| `GMGN_API_KEY` | Yes | GMGN API key (`x-apikey` header) |
-| `WALLET_PRIVATE_KEY` | No | Base58 private key (alternative to `/wallet import`) |
-| `ALLOWED_CHAT_IDS` | No | Comma-separated chat IDs (empty = allow all) |
 
 ---
 
