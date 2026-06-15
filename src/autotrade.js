@@ -664,9 +664,8 @@ async function checkPositions() {
         const walletBal = await getTokenBalance(pos.tokenMint);
         if (walletBal.amount <= 0) {
           const { closePosition } = require('./positions');
-          const totalReceived = pos.totalSolReceived || 0;
-          const pnl = totalReceived - (pos.solSpent || 0);
-          closePosition(pos.tokenMint, totalReceived, 'none', 'wallet_empty');
+          const pnl = (pos.totalSolReceived || 0) - (pos.solSpent || 0);
+          closePosition(pos.tokenMint, 0, 'none', 'wallet_empty');
           setPostCloseLock(pos.tokenMint);
           console.log(`[AUTO] 🧹 ${pos.symbol}: wallet empty, auto-closed (PNL: ${pnl.toFixed(4)} SOL)`);
           sendTelegram(
@@ -798,33 +797,44 @@ async function checkPositions() {
             ].join('\n');
             sendTelegram(rugAlertMsg, { parse_mode: 'HTML' }).catch(() => {});
 
-            if (pos.isDryRun) {
-              const virtualSol = quoteSolOut + (pos.totalSolReceived || 0);
-              const closed = dryRun.closeDryPosition(pos.tokenMint, virtualSol, 'rug_signal');
-              setPostCloseLock(pos.tokenMint);
-              await sendTelegram(
-                `🟡 <b>DRY RUN — Auto-Sell (Rug Signal): ${pos.symbol}</b>\n\n` +
-                `📊 PNL: ${closed.pnl >= 0 ? '+' : ''}${closed.pnl.toFixed(4)} SOL (${closed.pnlPct}%)\n` +
-                `📝 Reason: ${rugResult.signals.join(', ')}`
-              );
-            } else {
-              try {
-                const result = await sellAll(pos.tokenMint, autoConfig.walletLabel, 500);
-                if (result.success) {
-                  const closed = closePosition(pos.tokenMint, result.outputSol, result.signature, 'rug_signal');
-                  setPostCloseLock(pos.tokenMint);
-                  const emoji = closed.pnl >= 0 ? '🟢' : '🔴';
-                  await sendTelegram(
-                    `${emoji} <b>Auto-Sell (Rug Signal): ${pos.symbol}</b>\n\n` +
-                    `💰 Got: ${result.outputSol.toFixed(4)} SOL\n` +
-                    `📊 PNL: ${closed.pnl >= 0 ? '+' : ''}${closed.pnl.toFixed(4)} SOL (${closed.pnlPct}%)\n` +
-                    `📝 Reason: ${rugResult.signals.join(', ')}\n` +
-                    `🔗 <a href="https://solscan.io/tx/${result.signature}">TX</a>`
-                  );
+            // Acquire sell lock to prevent race with bundler/softSL loops
+            if (!acquireSellLock(pos.tokenMint)) {
+              console.log(`[AUTO] ${pos.symbol}: rug detected but sell lock held, will retry`);
+              continue;
+            }
+            try {
+              if (pos.isDryRun) {
+                const closed = dryRun.closeDryPosition(pos.tokenMint, quoteSolOut, 'rug_signal');
+                setPostCloseLock(pos.tokenMint);
+                releaseSellLock(pos.tokenMint);
+                await sendTelegram(
+                  `🟡 <b>DRY RUN — Auto-Sell (Rug Signal): ${pos.symbol}</b>\n\n` +
+                  `📊 PNL: ${closed.pnl >= 0 ? '+' : ''}${closed.pnl.toFixed(4)} SOL (${closed.pnlPct}%)\n` +
+                  `📝 Reason: ${rugResult.signals.join(', ')}`
+                );
+              } else {
+                try {
+                  const result = await sellAll(pos.tokenMint, autoConfig.walletLabel, 500);
+                  if (result.success) {
+                    const closed = closePosition(pos.tokenMint, result.outputSol, result.signature, 'rug_signal');
+                    setPostCloseLock(pos.tokenMint);
+                    releaseSellLock(pos.tokenMint);
+                    const emoji = closed.pnl >= 0 ? '🟢' : '🔴';
+                    await sendTelegram(
+                      `${emoji} <b>Auto-Sell (Rug Signal): ${pos.symbol}</b>\n\n` +
+                      `💰 Got: ${result.outputSol.toFixed(4)} SOL\n` +
+                      `📊 PNL: ${closed.pnl >= 0 ? '+' : ''}${closed.pnl.toFixed(4)} SOL (${closed.pnlPct}%)\n` +
+                      `📝 Reason: ${rugResult.signals.join(', ')}\n` +
+                      `🔗 <a href="https://solscan.io/tx/${result.signature}">TX</a>`
+                    );
+                  }
+                } catch (sellErr) {
+                  releaseSellLock(pos.tokenMint);
+                  console.error(`[AUTO] Rug sell failed: ${sellErr.message}`);
                 }
-              } catch (sellErr) {
-                console.error(`[AUTO] Rug sell failed: ${sellErr.message}`);
               }
+            } catch (lockErr) {
+              releaseSellLock(pos.tokenMint);
             }
             continue;
           }
