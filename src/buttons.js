@@ -115,6 +115,23 @@ const MENU = {
        { text: `📊 1h: <${cfg.customFilters?.maxPriceChange1h ?? 150}%`, callback_data: 'cfg_filter_maxPriceChange1h' }],
       [{ text: `🔥 Hot: ${cfg.customFilters?.minHotLevel ?? 1}+`, callback_data: 'cfg_filter_minHotLevel' },
        { text: `👀 Visits: ${cfg.customFilters?.minVisitingCount ?? 20}+`, callback_data: 'cfg_filter_minVisitingCount' }],
+      [{ text: `🤖 BotRate: <${((cfg.customFilters?.maxBotDegenRate ?? 0)*100).toFixed(0)}%`, callback_data: 'cfg_filter_maxBotDegenRate' },
+       { text: `🖼 ImgDup: ${cfg.customFilters?.maxImageDup ?? 0}`, callback_data: 'cfg_filter_maxImageDup' }],
+      [{ text: `🐦 TwLaunch: ${cfg.customFilters?.maxTwitterCreateTokenCount ?? 0}`, callback_data: 'cfg_filter_maxTwitterCreateTokenCount' },
+       { text: `💧 InitLiq: ${fmtVol(cfg.customFilters?.minInitialLiquidity ?? 0)}`, callback_data: 'cfg_filter_minInitialLiquidity' }],
+      [{ text: `📣 Boost: ${fmtVol(cfg.customFilters?.maxDexscrBoostFee ?? 0)}`, callback_data: 'cfg_filter_maxDexscrBoostFee' }],
+      // ── Duplicate Filters section ──
+      [{ text: '🔍 Duplicate Filters', callback_data: 'noop' }],
+      [{ text: cfg.duplicateFilters?.enabled ? '✅ Dup Filter ON' : '❌ Dup Filter OFF', callback_data: 'cfg_dup_toggle' }],
+      ...(cfg.duplicateFilters?.enabled ? [[
+        { text: `🖼 ImgDup: ${cfg.duplicateFilters?.maxImageDup ?? 0}`, callback_data: 'cfg_dup_maxImageDup' },
+        { text: `🐦 TwDup: ${cfg.duplicateFilters?.maxTwitterDup ?? 0}`, callback_data: 'cfg_dup_maxTwitterDup' }
+      ], [
+        { text: `📱 TgDup: ${cfg.duplicateFilters?.maxTelegramDup ?? 0}`, callback_data: 'cfg_dup_maxTelegramDup' },
+        { text: `🌐 WebDup: ${cfg.duplicateFilters?.maxWebsiteDup ?? 0}`, callback_data: 'cfg_dup_maxWebsiteDup' }
+      ], [
+        { text: `🔄 TwLaunch: ${cfg.duplicateFilters?.maxTwitterCreateTokenCount ?? 0}`, callback_data: 'cfg_dup_maxTwitterCreateTokenCount' }
+      ]] : []),
     ] : [
       // Default mode — show active (hard-coded) filters
       [{ text: `⏳ Age: 15-120m`, callback_data: 'noop' },
@@ -199,6 +216,18 @@ const MENU = {
     minVisitingCount: { label: 'Min Visiting Count', hint: 'e.g. 20', min: 0, max: 10000 },
     minBotDegen: { label: 'Min Bot Degen Count', hint: 'e.g. 10', min: 0, max: 10000 },
     maxBotDegen: { label: 'Max Bot Degen Count', hint: 'e.g. 300', min: 5, max: 50000 },
+    // ── New quality filters ──
+    maxBotDegenRate: { label: 'Max Bot Rate (%)', hint: 'e.g. 40 (0=OFF)', min: 0, max: 100 },
+    maxImageDup: { label: 'Max Logo Dup Count', hint: 'e.g. 50 (0=OFF)', min: 0, max: 10000 },
+    maxTwitterCreateTokenCount: { label: 'Max Twitter Token Launches', hint: 'e.g. 10 (0=OFF)', min: 0, max: 1000 },
+    minInitialLiquidity: { label: 'Min Initial Liquidity ($)', hint: 'e.g. 5000 (0=OFF)', min: 0, max: 1000000 },
+    maxDexscrBoostFee: { label: 'Max DexScreener Boost ($)', hint: 'e.g. 1 (0=OFF)', min: 0, max: 100000 },
+    // ── Duplicate filters ──
+    dup_maxImageDup: { label: 'Max Logo Dup Count', hint: 'e.g. 5 (0=OFF)', min: 0, max: 10000 },
+    dup_maxTwitterDup: { label: 'Max Twitter Dup Count', hint: 'e.g. 3 (0=OFF)', min: 0, max: 10000 },
+    dup_maxTelegramDup: { label: 'Max Telegram Dup Count', hint: 'e.g. 3 (0=OFF)', min: 0, max: 10000 },
+    dup_maxWebsiteDup: { label: 'Max Website Dup Count', hint: 'e.g. 5 (0=OFF)', min: 0, max: 10000 },
+    dup_maxTwitterCreateTokenCount: { label: 'Max Token Launches by Creator', hint: 'e.g. 10 (0=OFF)', min: 0, max: 1000 },
   },
 
   // Signal Scanner labels
@@ -509,6 +538,19 @@ async function handleCallbackQuery(cq) {
   const filterFieldMatch = data.match(/^cfg_filter_(.+)$/);
   if (filterFieldMatch) return cfgFilterPromptInput(chatId, filterFieldMatch[1]);
 
+  // ── Duplicate filter toggle (BEFORE regex match) ──
+  if (data === 'cfg_dup_toggle') {
+    const { updateAutoConfig, getAutoConfig } = require('../src/autotrade');
+    const cfg = getAutoConfig();
+    const current = cfg.duplicateFilters?.enabled !== false;
+    updateAutoConfig({ duplicateFilters: { ...(cfg.duplicateFilters || {}), enabled: !current } });
+    return sendConfigMenu(chatId);
+  }
+
+  // ── Duplicate filter field input ──
+  const dupFieldMatch = data.match(/^cfg_dup_(.+)$/);
+  if (dupFieldMatch) return cfgDupFilterPromptInput(chatId, dupFieldMatch[1]);
+
   // ── Noop (section headers) ──
   if (data === 'noop') return;
 
@@ -611,12 +653,24 @@ async function handlePendingInput(chatId, text) {
     const cfg = getAutoConfig();
     const filters = { ...(cfg.customFilters || {}) };
     // Rate fields need to be stored as decimal (0.3) but input is percentage (30)
-    if (pending.filterKey === 'maxBundlerRate' || pending.filterKey === 'maxTop10HolderRate' || pending.filterKey === 'maxEntrapment') {
+    if (pending.filterKey === 'maxBundlerRate' || pending.filterKey === 'maxTop10HolderRate' || pending.filterKey === 'maxEntrapment' || pending.filterKey === 'maxBotDegenRate') {
       filters[pending.filterKey] = num / 100;
     } else {
       filters[pending.filterKey] = num;
     }
     updateAutoConfig({ customFilters: filters });
+    pendingInputs.delete(chatId);
+    await sendConfigMenu(chatId);
+    return true;
+  }
+
+  // Duplicate filter field
+  if (pending.type === 'dupFilter') {
+    const { updateAutoConfig, getAutoConfig } = require('../src/autotrade');
+    const cfg = getAutoConfig();
+    const dupFilters = { ...(cfg.duplicateFilters || {}) };
+    dupFilters[pending.filterKey] = num;
+    updateAutoConfig({ duplicateFilters: dupFilters });
     pendingInputs.delete(chatId);
     await sendConfigMenu(chatId);
     return true;
@@ -916,6 +970,9 @@ async function sendConfigMenu(chatId) {
         `  Entrap: &lt;${((cfg.customFilters?.maxEntrapment ?? 0.08)*100).toFixed(0)}%`,
         `  5m: ${cfg.customFilters?.minPriceChange5m ?? -10}%~${cfg.customFilters?.maxPriceChange5m ?? 35}% | 1h: &lt;${cfg.customFilters?.maxPriceChange1h ?? 150}%`,
         `  Hot: ${cfg.customFilters?.minHotLevel ?? 1}+ | Visits: ${cfg.customFilters?.minVisitingCount ?? 20}+`,
+        `  BotRate: &lt;${((cfg.customFilters?.maxBotDegenRate ?? 0)*100).toFixed(0)}% | ImgDup: ${cfg.customFilters?.maxImageDup ?? 0}`,
+        `  TwLaunch: ${cfg.customFilters?.maxTwitterCreateTokenCount ?? 0} | InitLiq: ${fmtVol(cfg.customFilters?.minInitialLiquidity ?? 0)}`,
+        `  Boost: ${fmtVol(cfg.customFilters?.maxDexscrBoostFee ?? 0)}`,
       ] : []),
       ``,
       `📡 Signal: ${cfg.signalScanner?.enabled !== false ? '✅ ON' : '❌ OFF'} | Interval: ${cfg.signalScanner?.intervalSec ?? 30}s | MC: ${fmtMc(cfg.signalScanner?.mcMin ?? 10000)}-${fmtMc(cfg.signalScanner?.mcMax ?? 500000)}`,
@@ -1525,13 +1582,47 @@ async function cfgFilterPromptInput(chatId, filterKey) {
 
   // Special display for rate fields
   let displayVal = current;
-  if (filterKey === 'maxBundlerRate' || filterKey === 'maxTop10HolderRate' || filterKey === 'maxEntrapment') {
+  if (filterKey === 'maxBundlerRate' || filterKey === 'maxTop10HolderRate' || filterKey === 'maxEntrapment' || filterKey === 'maxBotDegenRate') {
     displayVal = `${(current * 100).toFixed(0)}%`;
   }
 
   await tgApi('sendMessage', {
     chat_id: chatId,
     text: `✏️ <b>${field.label}</b>\n\nCurrent: <code>${displayVal}</code>\n\nType new value (${field.hint}):`,
+    parse_mode: 'HTML',
+  });
+}
+
+// ── Duplicate filter prompt ──
+const DUP_LABELS = {
+  maxImageDup: { label: 'Max Logo Dup Count', hint: '0=ORI only, 5=relaxed', min: 0, max: 10000 },
+  maxTwitterDup: { label: 'Max Twitter Dup Count', hint: '0=ORI only, 3=relaxed', min: 0, max: 10000 },
+  maxTelegramDup: { label: 'Max Telegram Dup Count', hint: '0=ORI only, 3=relaxed', min: 0, max: 10000 },
+  maxWebsiteDup: { label: 'Max Website Dup Count', hint: '0=ORI only, 5=relaxed', min: 0, max: 10000 },
+  maxTwitterCreateTokenCount: { label: 'Max Token Launches by Creator', hint: '0=ORI only, 10=relaxed', min: 0, max: 1000 },
+};
+
+async function cfgDupFilterPromptInput(chatId, filterKey) {
+  const field = DUP_LABELS[filterKey];
+  if (!field) return;
+
+  const { getAutoConfig } = require('../src/autotrade');
+  const cfg = getAutoConfig();
+  const current = cfg.duplicateFilters?.[filterKey] ?? 0;
+
+  pendingInputs.set(chatId, {
+    type: 'dupFilter',
+    filterKey,
+    label: field.label,
+    hint: field.hint,
+    min: field.min,
+    max: field.max,
+    current,
+  });
+
+  await tgApi('sendMessage', {
+    chat_id: chatId,
+    text: `✏️ <b>${field.label}</b>\n\nCurrent: <code>${current}</code>\n\nType new value (${field.hint}):`,
     parse_mode: 'HTML',
   });
 }

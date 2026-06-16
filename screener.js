@@ -68,6 +68,12 @@ const DEFAULT_FILTERS = {
   maxEntrapment: 0.08,        // Entrapment < 8% — low rug risk
   minSniper: 3,               // Minimum interest — ada yang nonton
   maxSniper: 50,              // Maximum bot war — hindari sniper war
+  // ── New quality filters (default OFF = 0) ──
+  maxBotDegenRate: 0,         // Max bot degen rate (0.4 = 40%), 0 = OFF
+  maxImageDup: 0,             // Max logo duplicate count, 0 = OFF
+  maxTwitterCreateTokenCount: 0, // Max tokens launched by same Twitter, 0 = OFF
+  minInitialLiquidity: 0,     // Min launch liquidity ($), 0 = OFF
+  maxDexscrBoostFee: 0,       // Max DexScreener boost fee ($), 0 = OFF
 };
 
 function getActiveFilters() {
@@ -298,7 +304,7 @@ async function runScan() {
   console.log(`[Scan] ${all.size} tokens`);
 
   let count = 0;
-  let stats = { age: 0, mc: 0, vol: 0, wash: 0, bundler: 0, top10: 0, buysell: 0, seen: 0, score: 0, liq: 0, smart: 0, entrap: 0, sniper: 0, momentum: 0, hot: 0, visiting: 0, botdegen: 0 };
+  let stats = { age: 0, mc: 0, vol: 0, wash: 0, bundler: 0, top10: 0, buysell: 0, seen: 0, score: 0, liq: 0, smart: 0, entrap: 0, sniper: 0, momentum: 0, hot: 0, visiting: 0, botdegen: 0, botrate: 0, imgdup: 0, twcreate: 0, initliq: 0, boost: 0 };
   for (const [addr, t] of all) {
     const ageMin = getAgeMin(t, now);
     const mc = t.market_cap || t.fdv || 0;
@@ -317,6 +323,15 @@ async function runScan() {
     const hotLevel = t.hot_level || 0;
     const visiting = t.visiting_count || 0;
     const botDegen = t.bot_degen_count || 0;
+    const botDegenRate = t.bot_degen_rate || 0;
+    const imageDup = t.image_dup || 0;
+    const twitterCreateCount = t.twitter_create_token_count || 0;
+    const initialLiq = t.initial_liquidity || 0;
+    const boostFee = t.dexscr_boost_fee || 0;
+    // ── Duplicate fields ──
+    const twitterDup = parseInt(t.twitter_dup || 0);
+    const telegramDup = parseInt(t.telegram_dup || 0);
+    const websiteDup = parseInt(t.website_dup || 0);
     const pChange1m = t.price_change_percent1m || 0;
     const pChange5m = t.price_change_percent5m || 0;
     const pChange1h = t.price_change_percent1h || 0;
@@ -325,15 +340,16 @@ async function runScan() {
     console.log(`  [D] ${t.symbol || '?'} | age:${ageMin.toFixed(0)}m mc:$${Math.round(mc)} vol:$${Math.round(vol)} liq:$${Math.round(liq)} wash:${isWash} bundler:${(bundler*100).toFixed(0)}% top10:${(top10*100).toFixed(0)}% B/S:${bsRatio.toFixed(1)} smart:${smartDegen} sniper:${sniperCount} entrap:${(entrapment*100).toFixed(1)}% hot:${hotLevel} 5m:${pChange5m.toFixed(1)}% 1h:${pChange1h.toFixed(0)}% seen:${!!seen[addr]}`);
 
     // ── Existing filters ──
-    if (ageMin < CONFIG.minAgeMin || ageMin > CONFIG.maxAgeMin) { stats.age++; continue; }
+    if (ageMin < CONFIG.minAgeMin || (CONFIG.maxAgeMin && ageMin > CONFIG.maxAgeMin)) { stats.age++; continue; }
     // Trenches pre-bond tokens have MC ≈ $0 — skip MC filter, rely on liquidity instead
     if (source !== 'trenches') {
-      if (mc < CONFIG.minMC || mc > CONFIG.maxMC) { stats.mc++; continue; }
+      if (CONFIG.minMC && mc < CONFIG.minMC) { stats.mc++; continue; }
+      if (CONFIG.maxMC && mc > CONFIG.maxMC) { stats.mc++; continue; }
     }
     if (vol < CONFIG.minVolume) { stats.vol++; continue; }
     if (t.is_wash_trading) { stats.wash++; continue; }
-    if (bundler > CONFIG.maxBundlerRate) { stats.bundler++; continue; }
-    if (top10 > CONFIG.maxTop10HolderRate) { stats.top10++; continue; }
+    if (CONFIG.maxBundlerRate && bundler > CONFIG.maxBundlerRate) { stats.bundler++; continue; }
+    if (CONFIG.maxTop10HolderRate && top10 > CONFIG.maxTop10HolderRate) { stats.top10++; continue; }
     const holders = t.holder_count || 0;
     if (CONFIG.minHolder && holders < CONFIG.minHolder) { stats.holder = (stats.holder || 0) + 1; continue; }
     if (sells > 0 && buys / sells < CONFIG.minBuyRatio) { stats.buysell++; continue; }
@@ -341,9 +357,26 @@ async function runScan() {
     // ── Pre-pump default filters ──
     if (liq < (CONFIG.minLiquidity || 0)) { stats.liq++; continue; }
     if (smartDegen < (CONFIG.minSmartDegen || 0)) { stats.smart++; continue; }
-    if (entrapment > (CONFIG.maxEntrapment ?? 1)) { stats.entrap++; continue; }
+    if (CONFIG.maxEntrapment && entrapment > CONFIG.maxEntrapment) { stats.entrap++; continue; }
     if (sniperCount < (CONFIG.minSniper || 0)) { stats.sniper++; continue; }
-    if (sniperCount > (CONFIG.maxSniper ?? 999)) { stats.sniper++; continue; }
+    if (CONFIG.maxSniper && sniperCount > CONFIG.maxSniper) { stats.sniper++; continue; }
+
+    // ── New quality filters (skip if 0 = OFF) ──
+    if (CONFIG.maxBotDegenRate && botDegenRate > CONFIG.maxBotDegenRate) { stats.botrate++; continue; }
+    if (CONFIG.maxImageDup && imageDup > CONFIG.maxImageDup) { stats.imgdup++; continue; }
+    if (CONFIG.maxTwitterCreateTokenCount && twitterCreateCount > CONFIG.maxTwitterCreateTokenCount) { stats.twcreate++; continue; }
+    if (CONFIG.minInitialLiquidity && initialLiq < CONFIG.minInitialLiquidity) { stats.initliq++; continue; }
+    if (CONFIG.maxDexscrBoostFee && boostFee > CONFIG.maxDexscrBoostFee) { stats.boost++; continue; }
+
+    // ── Duplicate filters (from duplicateFilters section) ──
+    const dupFilters = getAutoConfig().duplicateFilters || {};
+    if (dupFilters.enabled) {
+      if (imageDup > (dupFilters.maxImageDup ?? 0)) { stats.dup_img = (stats.dup_img || 0) + 1; continue; }
+      if (twitterDup > (dupFilters.maxTwitterDup ?? 0)) { stats.dup_tw = (stats.dup_tw || 0) + 1; continue; }
+      if (telegramDup > (dupFilters.maxTelegramDup ?? 0)) { stats.dup_tg = (stats.dup_tg || 0) + 1; continue; }
+      if (websiteDup > (dupFilters.maxWebsiteDup ?? 0)) { stats.dup_web = (stats.dup_web || 0) + 1; continue; }
+      if (twitterCreateCount > (dupFilters.maxTwitterCreateTokenCount ?? 0)) { stats.dup_create = (stats.dup_create || 0) + 1; continue; }
+    }
 
     // ── Custom momentum/heat filters (skip for trenches — pre-bond tokens have 0% price data) ──
     if (CONFIG._isCustom && source !== 'trenches') {
@@ -359,7 +392,7 @@ async function runScan() {
     // Per-source dedup with TTL check
     if (seen[addr]) {
       const cfg = getAutoConfig();
-      const ttlMs = (cfg.dedup?.globalTtlSec || 180) * 1000;
+      const ttlMs = (cfg.dedup?.seenTtlSec || 3600) * 1000; // 1 hour default (not globalTtlSec)
       if (Date.now() - (seen[addr].ts || 0) < ttlMs) {
         stats.seen++; continue;
       }
@@ -367,11 +400,11 @@ async function runScan() {
       delete seen[addr];
     }
 
-    // Global dedup check (prevents same token from trending+trenches+signal)
+    // Global dedup — only block if same source (prevent cross-source collision)
     const globalDedup = checkGlobalDedup(addr);
-    if (globalDedup) {
+    if (globalDedup && globalDedup.firstSource === source) {
       const ageSec = Math.round((Date.now() - globalDedup.firstSeen) / 1000);
-      console.log(`  [DEDUP] ${t.symbol} skipped by global dedup (first: ${globalDedup.firstSource}, ${ageSec}s ago)`);
+      console.log(`  [DEDUP] ${t.symbol} skipped by global dedup (same source: ${source}, ${ageSec}s ago)`);
       stats.seen++;
       continue;
     }
@@ -394,7 +427,13 @@ async function runScan() {
       console.log(`  [SIGNAL] ${t.symbol} base:${baseScore} signal:+${signalMeta.appliedSignal} penalty:-${signalMeta.penalty} final:${finalScore}`);
     }
 
-    if (finalScore < Math.max(35, cfg.minScore || 40)) { stats.score++; continue; }
+    // Skip score filter for trenches — pre-bond tokens have no smart money/volume data
+    if (source !== 'trenches') {
+      if (finalScore < Math.max(35, cfg.minScore || 40)) { stats.score++; continue; }
+    } else {
+      // Trenches: lower score threshold (pre-bond tokens score low naturally)
+      if (finalScore < 25) { stats.score++; continue; }
+    }
 
     t._ageMin = ageMin;
     const scoreDisplay = signalMeta ? `${finalScore} (base:${baseScore}+${signalMeta.appliedSignal})` : `${baseScore}`;
@@ -454,7 +493,7 @@ async function runScan() {
   }
 
   saveSeen(seen, source);
-  console.log(`[Scan] Done. ${count} alerts. Filtered out: age=${stats.age} mc=${stats.mc} vol=${stats.vol} wash=${stats.wash} bundler=${stats.bundler} top10=${stats.top10} holder=${stats.holder||0} buysell=${stats.buysell} liq=${stats.liq} smart=${stats.smart} entrap=${stats.entrap} sniper=${stats.sniper} momentum=${stats.momentum} hot=${stats.hot} visiting=${stats.visiting} botdegen=${stats.botdegen} seen=${stats.seen} score=${stats.score}`);
+  console.log(`[Scan] Done. ${count} alerts. Filtered out: age=${stats.age} mc=${stats.mc} vol=${stats.vol} wash=${stats.wash} bundler=${stats.bundler} top10=${stats.top10} holder=${stats.holder||0} buysell=${stats.buysell} liq=${stats.liq} smart=${stats.smart} entrap=${stats.entrap} sniper=${stats.sniper} momentum=${stats.momentum} hot=${stats.hot} visiting=${stats.visiting} botdegen=${stats.botdegen} botrate=${stats.botrate} imgdup=${stats.imgdup} twcreate=${stats.twcreate} initliq=${stats.initliq} boost=${stats.boost} seen=${stats.seen} score=${stats.score}`);
 }
 
 // Run once if executed directly

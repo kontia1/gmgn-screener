@@ -93,9 +93,9 @@ function _openPosition(tokenMint, symbol, entryPrice, solSpent, tokenAmount, dec
 
     // Partial sells: [{atPct, sellPct, sold, txSig}]
     partialSells: (opts.partialSells || [
-      { atPct: 50,  sellPct: 50, sold: false, enabled: true },
-      { atPct: 100, sellPct: 25, sold: false, enabled: true },
-      { atPct: 200, sellPct: 25, sold: false, enabled: true },
+      { atPct: 25,  sellPct: 50, sold: false, enabled: true },
+      { atPct: 50,  sellPct: 25, sold: false, enabled: true },
+      { atPct: 50,  sellPct: 25, sold: false, enabled: false },
     ]).map(s => ({ ...s, sold: false, txSig: null, enabled: s.enabled !== false })),
 
     // Market data

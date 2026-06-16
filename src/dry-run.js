@@ -132,6 +132,9 @@ function closeDryPosition(tokenMint, solVirtual, reason = 'manual') {
   const pnl = totalReceived - pos.solSpent;
   const pnlPct = ((totalReceived - pos.solSpent) / pos.solSpent * 100).toFixed(1);
 
+  // Update pos.totalSolReceived BEFORE spread (so closed object has correct value)
+  pos.totalSolReceived = totalReceived;
+
   const closed = {
     ...pos,
     solReceived: totalReceived,

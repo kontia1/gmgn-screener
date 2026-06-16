@@ -133,7 +133,20 @@ maxTop10HolderRate: 95%
 ```
 
 *Custom Mode (editable via Telegram `/config`):*
-All filters adjustable — minAge, maxAge, minMC, maxMC, minVol, minLiq, maxLiq, minBuyRatio, maxBundler, maxTop10, minHolder. All values can be set to **0** to disable.
+All filters adjustable — minAge, maxAge, minMC, maxMC, minVol, minLiq, minBuyRatio, maxBundler, maxTop10, minHolder, maxBotDegenRate, maxEntrapment, minHotLevel, minVisitingCount, maxPriceChange1h, minPriceChange5m, maxPriceChange5m. All values can be set to **0** to disable.
+
+**Duplicate Filters (separate section in `/config`):**
+Toggle ON/OFF independently. When ON, threshold `0` = ORI only (reject all duplicates).
+
+| Filter | Description | Default |
+|--------|-------------|---------|
+| maxImageDup | Max logo image duplicate count | 0 (ORI only) |
+| maxTwitterDup | Max Twitter handle duplicate count | 0 (ORI only) |
+| maxTelegramDup | Max Telegram link duplicate count | 0 (ORI only) |
+| maxWebsiteDup | Max website URL duplicate count | 0 (ORI only) |
+| maxTwitterCreateTokenCount | Max tokens created by same Twitter | 0 (ORI only) |
+
+Toggle OFF = skip duplicate check entirely. Toggle ON + threshold 0 = reject any token with duplicates (strictest). Toggle ON + threshold 5 = allow tokens with up to 5 duplicates (relaxed).
 
 ---
 
@@ -254,14 +267,16 @@ Each level individually toggleable with configurable trigger PNL and sell percen
 Per-position monitoring checks each open position every 30 seconds for rug signals.
 
 **6 Rug Signals (scored 0-100):**
-- **Price crash** (30) — > -50% from entry
-- **Liquidity drain** (25) — > -60% liquidity drop
-- **Top holder dump** (20) — Top holder sold > 50%
-- **Volume spike + dump** (15) — 10x volume + price drop
-- **Honeypot sell fail** (5) — Sell transaction reverts
-- **LP removal** (5) — Liquidity removed from pool
+- **Holder exodus** (30) — Holder count drops > 40% from entry
+- **Top10 consolidation** (30) — Top 10 holder rate spikes > 50% from entry
+- **Liquidity drain** (30) — Liquidity drops > 50% from entry
+- **Entrapment spike** (20) — Entrapment ratio rises above 15% (was < 5%)
+- **Creator concentration** (25) — Creator holds > 90% of supply
+- **Fresh wallets** (15) — > 95% fresh wallets (possible bot/fake wallets)
 
 **Auto-Sell Threshold:** Score ≥ 30 → automatic sell + rug notification
+
+**API Error Handling:** Retries 3x on GMGN API failure. If all retries fail and position is > 30 minutes old, treats as suspicious (isRug = true). Absolute checks (creator hold >90%, top10 >90%, entrapment >90%) don't require snapshot comparison — they detect rugs even without historical data.
 
 **Pre-Bond Skip:** Skips liquidity drain signal for tokens with < $10K liquidity (pre-bond phase has naturally volatile liquidity).
 
@@ -386,16 +401,19 @@ All trading parameters editable in real-time via Telegram.
 | Mode | dry_run | live/dry_run | Trading mode |
 | Buy Amount | 1 SOL | 0.001-10 | SOL per buy |
 | Soft SL | -20% | -5 to -50 | Soft stop loss (wait for recovery) |
-| Soft SL Wait | 15s | 5-120 | Seconds to wait before soft SL sells |
-| Hard SL | -35% | -5 to -95 | Hard stop loss (instant sell) |
-| Trail Drop | 10% | 1-50 | Drop from peak to trigger trailing |
-| Trigger | +13% | +5 to +100 | Peak PNL to activate trailing |
-| Score | 45 | 10-100 | Min screener score to auto-buy |
-| Max Positions | 5/10 | 1-20 | Max concurrent positions (live/dry) |
+| Soft SL Wait | 30s | 5-120 | Seconds to wait before soft SL sells |
+| Hard SL | -25% | -5 to -95 | Hard stop loss (instant sell) |
+| Trail Drop | 15% | 1-50 | Drop from peak to trigger trailing |
+| Trigger | +30% | +5 to +100 | Peak PNL to activate trailing |
+| Score | 50 | 10-100 | Min screener score to auto-buy |
+| Max Positions | 5 | 1-20 | Max concurrent positions |
 | Check Interval | 10s | 10-3600 | Position check frequency (seconds) |
 | Scan Interval | 30s | 10-3600 | Screener scan frequency (seconds) |
 | Slippage | 500 bps | 10-5000 | Swap slippage tolerance |
-| Buy Lock | 120s | 0-600 | Cooldown per CA (source-agnostic) |
+| Buy Lock | 300s | 0-600 | Cooldown per CA (source-agnostic) |
+| Liq Drain Exit | 50% | 10-90 | Liquidity drop % to trigger exit |
+| Liq Drain Warn | 30% | 10-80 | Liquidity drop % to trigger warning |
+| Liq Drain Check | 10s | 5-60 | Liquidity check interval |
 
 ---
 

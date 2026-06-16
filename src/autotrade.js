@@ -570,16 +570,19 @@ async function checkRugSignals(pos) {
   const signals = [];
   let rugScore = 0;
 
+  // C1 FIX: Move execAsync outside try so catch block can use it for retries
+  const { exec } = require('child_process');
+  const util = require('util');
+  const execAsync = util.promisify(exec);
+
   try {
     // Fetch current GMGN data via CLI (async, non-blocking)
-    const { exec } = require('child_process');
-    const util = require('util');
-    const execAsync = util.promisify(exec);
     const { stdout } = await execAsync(`gmgn-cli token info --chain sol --address ${pos.tokenMint}`, {
       encoding: 'utf8', timeout: 10000,
     });
     const data = JSON.parse(stdout);
-    const t = data?.data || {};
+    // GMGN CLI returns data at top level (no .data wrapper)
+    const t = data?.data || data || {};
     const dev = t.dev || {};
     const stat = t.stat || {};
     const pool = t.pool || {};
@@ -642,8 +645,87 @@ async function checkRugSignals(pos) {
     return { isRug: rugScore >= 30, signals, rugScore };
 
   } catch (e) {
-    // Don't block on API errors
-    return { isRug: false, signals: [], error: e.message };
+    // API error — retry 3x before giving up
+    console.log(`[RUG] ${pos.symbol}: GMGN API error (${e.message?.slice(0, 60)}), retrying...`);
+    for (let attempt = 2; attempt <= 3; attempt++) {
+      try {
+        await new Promise(r => setTimeout(r, 2000));
+        const { stdout: retryOut } = await execAsync(`gmgn-cli token info --chain sol --address ${pos.tokenMint}`, {
+          encoding: 'utf8', timeout: 10000,
+        });
+        const retryData = JSON.parse(retryOut);
+        const rt = retryData?.data || {};
+        const rStat = rt.stat || {};
+        const rPool = rt.pool || {};
+        const rDev = rt.dev || {};
+
+        // Quick rug checks on retry data
+        const retryHolders = rt.holder_count || 0;
+        const retryLiq = parseFloat(rPool.liquidity || 0);
+        const retryTop10 = parseFloat(rDev.top_10_holder_rate || 0);
+        const retryCreatorHold = parseFloat(rStat.creator_hold_rate || 0);
+        const retryEntrapment = parseFloat(rStat.top_entrapment_trader_percentage || 0);
+
+        // If all values are 0/null — token is likely dead/rugged
+        if (retryHolders === 0 && retryLiq === 0) {
+          signals.push(`GMGN returned 0 holders + $0 liq — token is dead`);
+          return { isRug: true, signals, rugScore: 100 };
+        }
+
+        // Check absolute rug signals (not relative to snapshot)
+        if (retryCreatorHold > 0.90) {
+          signals.push(`Creator holds ${(retryCreatorHold*100).toFixed(1)}% of supply (API retry)`);
+          rugScore += 25;
+        }
+        if (retryTop10 > 0.90) {
+          signals.push(`Top10 holders own ${(retryTop10*100).toFixed(1)}% (API retry)`);
+          rugScore += 30;
+        }
+        if (retryEntrapment > 0.90) {
+          signals.push(`Entrapment ${(retryEntrapment*100).toFixed(1)}% (API retry)`);
+          rugScore += 20;
+        }
+
+        // Also do relative checks if we got valid data
+        if (snap.holders > 10 && retryHolders > 0) {
+          const holderDrop = ((snap.holders - retryHolders) / snap.holders) * 100;
+          if (holderDrop > 40) {
+            signals.push(`Holders dropped ${holderDrop.toFixed(0)}% (${snap.holders} → ${retryHolders})`);
+            rugScore += 30;
+          }
+        }
+        if (snap.liquidity > 1000 && retryLiq > 0) {
+          const liqDrop = ((snap.liquidity - retryLiq) / snap.liquidity) * 100;
+          if (liqDrop > 50) {
+            signals.push(`Liquidity dropped ${liqDrop.toFixed(0)}% ($${Math.round(snap.liquidity)} → $${Math.round(retryLiq)})`);
+            rugScore += 30;
+          }
+        }
+        if (retryTop10 > 0 && snap.top10 > 0) {
+          const top10Spike = ((retryTop10 - snap.top10) / snap.top10) * 100;
+          if (top10Spike > 50) {
+            signals.push(`Top10 holders spiked ${top10Spike.toFixed(0)}% (${(snap.top10*100).toFixed(1)}% → ${(retryTop10*100).toFixed(1)}%)`);
+            rugScore += 30;
+          }
+        }
+
+        if (signals.length > 0) {
+          return { isRug: rugScore >= 30, signals, rugScore };
+        }
+        // Got data but no signals — not a rug
+        return { isRug: false, signals: [], rugScore: 0 };
+      } catch (retryErr) {
+        console.log(`[RUG] ${pos.symbol}: Retry ${attempt}/3 failed: ${retryErr.message?.slice(0, 50)}`);
+      }
+    }
+
+    // All 3 retries failed — if position is old (> 30 min), treat as suspicious
+    const ageMs = Date.now() - new Date(pos.openedAt).getTime();
+    if (ageMs > 30 * 60 * 1000) {
+      console.log(`[RUG] ${pos.symbol}: All API retries failed after ${Math.round(ageMs/60000)}min old position — treating as suspicious`);
+      return { isRug: true, signals: ['GMGN API failed 3x on aged position — possible rug'], rugScore: 50 };
+    }
+    return { isRug: false, signals: [], error: 'API failed 3x (position too new to flag)' };
   }
 }
 
@@ -1002,33 +1084,59 @@ async function checkBundlers() {
           sendTelegram(bundlerMsg, { parse_mode: 'HTML' }).catch(() => {});
 
           if (isDry) {
-            // Get quote for accurate PNL in dry run
+            // Get quote for accurate PNL in dry run (retry 3x)
             let bundlerQuoteSol = 0;
-            try {
-              const { getQuote: bqGetQuote, SOL_MINT: bqSol } = require('./trading');
-              const bqRaw = Math.floor(pos.remainingTokens * Math.pow(10, pos.decimals));
-              const bqQuote = await bqGetQuote(pos.tokenMint, bqSol, bqRaw, 500);
-              bundlerQuoteSol = parseFloat(bqQuote.outAmount) / 1e9;
-            } catch (_) {}
+            for (let attempt = 1; attempt <= 3; attempt++) {
+              try {
+                const { getQuote: bqGetQuote, SOL_MINT: bqSol } = require('./trading');
+                const bqRaw = Math.floor(pos.remainingTokens * Math.pow(10, pos.decimals));
+                const bqQuote = await bqGetQuote(pos.tokenMint, bqSol, bqRaw, 500);
+                bundlerQuoteSol = parseFloat(bqQuote.outAmount) / 1e9;
+                if (bundlerQuoteSol > 0) break;
+              } catch (_) {}
+              if (attempt < 3) await new Promise(r => setTimeout(r, 2000));
+            }
+            // Fallback: use GMGN current price if Jupiter failed
+            if (bundlerQuoteSol <= 0 && pos.remainingTokens > 0) {
+              try {
+                const gmgnData = await gmgnTokenInfo(pos.tokenMint);
+                const curPrice = parseFloat(gmgnData?.price?.price || 0);
+                if (curPrice > 0) {
+                  bundlerQuoteSol = pos.remainingTokens * curPrice;
+                  console.log(`[BUNDLER] ${pos.symbol}: Jupiter failed, used GMGN price $${curPrice} → ${bundlerQuoteSol.toFixed(4)} SOL`);
+                }
+              } catch (_) {}
+            }
+            // Last resort: estimate from entry (should rarely happen)
+            if (bundlerQuoteSol <= 0 && pos.entryPrice > 0 && pos.remainingTokens > 0) {
+              bundlerQuoteSol = pos.remainingTokens * pos.entryPrice;
+              console.log(`[BUNDLER] ${pos.symbol}: All price sources failed, estimated from entry: ${bundlerQuoteSol.toFixed(4)} SOL`);
+            }
             const closed = dryRun.closeDryPosition(pos.tokenMint, bundlerQuoteSol, 'bundler_detected');
             setPostCloseLock(pos.tokenMint);
             await sendTelegram(`🟡 <b>DRY RUN — Auto-Sell (Bundler): ${pos.symbol}</b>\n\n📊 PNL: ${closed.pnl >= 0 ? '+' : ''}${closed.pnl.toFixed(4)} SOL (${closed.pnlPct}%)`);
           } else {
-            try {
-              const result = await sellAll(pos.tokenMint, autoConfig.walletLabel, 500);
-              if (result.success) {
-                const closed = closePosition(pos.tokenMint, result.outputSol, result.signature, 'bundler_detected');
-                setPostCloseLock(pos.tokenMint);
-                const emoji = closed.pnl >= 0 ? '🟢' : '🔴';
-                await sendTelegram(`${emoji} <b>Auto-Sell (Bundler): ${pos.symbol}</b>\n\n💰 Got: ${result.outputSol.toFixed(4)} SOL\n📊 PNL: ${closed.pnl >= 0 ? '+' : ''}${closed.pnl.toFixed(4)} SOL (${closed.pnlPct}%)\n🔗 <a href="https://solscan.io/tx/${result.signature}">TX</a>`);
+            // Live: retry sell 3x before giving up
+            let sellResult = null;
+            for (let attempt = 1; attempt <= 3; attempt++) {
+              try {
+                sellResult = await sellAll(pos.tokenMint, autoConfig.walletLabel, 500);
+                if (sellResult.success) break;
+              } catch (sellErr) {
+                console.error(`[BUNDLER] Sell attempt ${attempt}/3 failed: ${sellErr.message}`);
+                if (attempt < 3) await new Promise(r => setTimeout(r, 2000));
               }
-            } catch (sellErr) {
-              console.error(`[BUNDLER] Sell failed: ${sellErr.message}`);
-              if (sellErr.message.includes('NO_ROUTES') || sellErr.message.includes('No routes')) {
-                const closed = closePosition(pos.tokenMint, 0, '', 'bundler_no_routes');
-                setPostCloseLock(pos.tokenMint);
-                await sendTelegram(`🔴 <b>Auto-Close (Bundler + No Routes): ${pos.symbol}</b>\n\n📊 PNL: -${pos.solSpent?.toFixed(4) || '?'} SOL (total loss)\n📝 Token is dead — position closed`);
-              }
+            }
+            if (sellResult?.success) {
+              const closed = closePosition(pos.tokenMint, sellResult.outputSol, sellResult.signature, 'bundler_detected');
+              setPostCloseLock(pos.tokenMint);
+              const emoji = closed.pnl >= 0 ? '🟢' : '🔴';
+              await sendTelegram(`${emoji} <b>Auto-Sell (Bundler): ${pos.symbol}</b>\n\n💰 Got: ${sellResult.outputSol.toFixed(4)} SOL\n📊 PNL: ${closed.pnl >= 0 ? '+' : ''}${closed.pnl.toFixed(4)} SOL (${closed.pnlPct}%)\n🔗 <a href="https://solscan.io/tx/${sellResult.signature}">TX</a>`);
+            } else {
+              // All 3 retries failed — close as loss
+              const closed = closePosition(pos.tokenMint, 0, '', 'bundler_no_routes');
+              setPostCloseLock(pos.tokenMint);
+              await sendTelegram(`🔴 <b>Auto-Close (Bundler + No Routes): ${pos.symbol}</b>\n\n📊 PNL: -${pos.solSpent?.toFixed(4) || '?'} SOL (total loss)\n📝 Token is dead — position closed`);
             }
           }
           // C2 FIX: Release sell lock after bundler sell attempt
@@ -1088,8 +1196,10 @@ function startMonitor() {
             const rawAmount = Math.floor(pos.remainingTokens * Math.pow(10, pos.decimals));
             const quote = await getQuote(pos.tokenMint, SOL_MINT, rawAmount, 500);
             const quoteSolOut = parseFloat(quote.outAmount) / 1e9;
-            const currentPrice = pos.remainingTokens > 0 ? quoteSolOut / pos.remainingTokens : 0;
-            const pnlPct = pos.entryPrice > 0 ? ((currentPrice - pos.entryPrice) / pos.entryPrice * 100) : 0;
+            // H1 FIX: Use consistent PNL calc that accounts for partial sells
+            const totalValueSol = quoteSolOut + (pos.totalSolReceived || 0);
+            const pnlSol = totalValueSol - pos.solSpent;
+            const pnlPct = pos.solSpent > 0 ? (pnlSol / pos.solSpent * 100) : 0;
 
             // Layer 2: Hard SL — instant sell during soft wait
             if (pnlPct <= -hardSlPct) {
@@ -1141,10 +1251,15 @@ function startMonitor() {
           else updatePosition(pos.tokenMint, { _lastLiqCheck: liqCheckNow });
 
           const curData = await gmgnTokenInfo(pos.tokenMint);
-          const curLiq = parseFloat(curData?.pool?.liquidity || 0);
+          const rawLiq = curData?.pool?.liquidity;
+          const curLiq = parseFloat(rawLiq);
           const entryLiq = pos.gmgnSnapshot.liquidity;
 
-          if (curLiq <= 0 || entryLiq <= 0) { releaseSellLock(pos.tokenMint); continue; }
+          // Skip if API returns null/undefined/NaN/0/tiny (API glitch, not real rug)
+          if (!Number.isFinite(curLiq) || curLiq < 100 || entryLiq <= 0) {
+            if (curLiq < 100 && curLiq >= 0) console.log(`[LIQ-DRAIN] ${pos.symbol}: GMGN returned liq=$${curLiq}, likely API glitch — skipping`);
+            releaseSellLock(pos.tokenMint); continue;
+          }
 
           const liqDrop = ((entryLiq - curLiq) / entryLiq) * 100;
 
@@ -1158,6 +1273,22 @@ function startMonitor() {
               const lqQuote = await lqGetQuote(pos.tokenMint, lqSol, lqRaw, 500);
               liqQuoteSol = parseFloat(lqQuote.outAmount) / 1e9;
             } catch (_) {}
+
+            // Fallback 1: use GMGN current price (most accurate)
+            if (liqQuoteSol <= 0 && pos.remainingTokens > 0) {
+              try {
+                const curPrice = parseFloat(curData?.price?.price || 0);
+                if (curPrice > 0) {
+                  liqQuoteSol = pos.remainingTokens * curPrice;
+                  console.log(`[LIQ-DRAIN] ${pos.symbol}: Jupiter failed, used GMGN price → ${liqQuoteSol.toFixed(4)} SOL`);
+                }
+              } catch (_) {}
+            }
+            // Fallback 2: estimate from entry price × liq drop ratio
+            if (liqQuoteSol <= 0 && pos.entryPrice > 0 && pos.remainingTokens > 0) {
+              liqQuoteSol = pos.remainingTokens * pos.entryPrice * ((100 - liqDrop) / 100);
+              console.log(`[LIQ-DRAIN] ${pos.symbol}: All sources failed, estimated ${liqQuoteSol.toFixed(4)} SOL from liqDrop`);
+            }
             await executeFullExit(pos, `Liq Drain (-${liqDrop.toFixed(0)}%, $${Math.round(entryLiq)}→$${Math.round(curLiq)})`, liqQuoteSol, { lockHeld: true });
           } else if (liqDrop >= liqWarnPct) {
             // Warning at 30% — don't sell yet, but alert
