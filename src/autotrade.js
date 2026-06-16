@@ -972,8 +972,8 @@ async function checkPositions() {
       }
 
       // 3. Check 2-Layer SL
-      const softSlPct = autoConfig.softSlPct || 15;
-      const hardSlPct = autoConfig.hardSlPct || autoConfig.slPct || 40;
+      const softSlPct = autoConfig.softSlPct || 20;
+      const hardSlPct = autoConfig.hardSlPct || autoConfig.slPct || 25;
       const softSlWaitSec = autoConfig.softSlWaitSec || 30;
 
       // Layer 2: Hard SL — instant sell (no mercy)
@@ -1274,13 +1274,20 @@ function startMonitor() {
               liqQuoteSol = parseFloat(lqQuote.outAmount) / 1e9;
             } catch (_) {}
 
-            // Fallback 1: use GMGN current price (most accurate)
+            // Fallback 1: use GMGN current price (convert USD → SOL)
             if (liqQuoteSol <= 0 && pos.remainingTokens > 0) {
               try {
-                const curPrice = parseFloat(curData?.price?.price || 0);
-                if (curPrice > 0) {
-                  liqQuoteSol = pos.remainingTokens * curPrice;
-                  console.log(`[LIQ-DRAIN] ${pos.symbol}: Jupiter failed, used GMGN price → ${liqQuoteSol.toFixed(4)} SOL`);
+                const curPriceUSD = parseFloat(curData?.price?.price || 0);
+                if (curPriceUSD > 0) {
+                  if (!global._solPriceUsd || Date.now() - (global._solPriceTs || 0) > 60000) {
+                    const resp = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd');
+                    const d = await resp.json();
+                    global._solPriceUsd = d.solana.usd;
+                    global._solPriceTs = Date.now();
+                  }
+                  const curPriceSOL = curPriceUSD / global._solPriceUsd;
+                  liqQuoteSol = pos.remainingTokens * curPriceSOL;
+                  console.log(`[LIQ-DRAIN] ${pos.symbol}: Jupiter failed, used GMGN price ($${curPriceUSD}) → ${liqQuoteSol.toFixed(4)} SOL`);
                 }
               } catch (_) {}
             }
