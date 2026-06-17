@@ -713,7 +713,7 @@ async function checkRugSignals(pos) {
         }
 
         if (signals.length > 0) {
-          return { isRug: rugScore >= 30, signals, rugScore };
+          return { isRug: rugScore > 0, signals, rugScore };
         }
         // Got data but no signals — not a rug
         return { isRug: false, signals: [], rugScore: 0 };
@@ -853,80 +853,7 @@ async function checkPositions() {
       const pnlPct = pos.solSpent > 0 ? (pnlSol / pos.solSpent * 100) : 0;
 
       // Bundler check moved to independent 3s loop (checkBundlers)
-
-      // Rug detection — check GMGN data changes every 3s
-      const rugCheckNow = Date.now();
-      const lastRugCheck = pos.lastRugCheck || 0;
-      if (rugCheckNow - lastRugCheck > 3000 && pos.gmgnSnapshot) {
-        try {
-          const rugResult = await checkRugSignals(pos);
-          if (pos.isDryRun) dryRun.updateDryPosition(pos.tokenMint, { lastRugCheck: rugCheckNow });
-          else updatePosition(pos.tokenMint, { lastRugCheck: rugCheckNow });
-
-          if (rugResult.isRug) {
-            console.log(`[AUTO] 🚨 ${pos.symbol}: RUG DETECTED — ${rugResult.signals.join(', ')}`);
-
-            // Send alert
-            const rugAlertMsg = [
-              `🚨 <b>RUG SIGNAL DETECTED</b>`,
-              ``,
-              `Token: <b>${pos.symbol || 'Unknown'}</b>`,
-              `CA: <code>${pos.tokenMint}</code>`,
-              `Entry: ${pos.solSpent?.toFixed(4) || '?'} SOL`,
-              `PNL: ${pnlPct?.toFixed(1) || '?'}%`,
-              ``,
-              `⚠️ Signals:`,
-              ...rugResult.signals.map(s => `• ${s}`),
-              ``,
-              `Selling immediately...`,
-            ].join('\n');
-            sendTelegram(rugAlertMsg, { parse_mode: 'HTML' }).catch(() => {});
-
-            // Acquire sell lock to prevent race with bundler/softSL loops
-            if (!acquireSellLock(pos.tokenMint)) {
-              console.log(`[AUTO] ${pos.symbol}: rug detected but sell lock held, will retry`);
-              continue;
-            }
-            try {
-              if (pos.isDryRun) {
-                const closed = dryRun.closeDryPosition(pos.tokenMint, quoteSolOut, 'rug_signal');
-                setPostCloseLock(pos.tokenMint);
-                releaseSellLock(pos.tokenMint);
-                await sendTelegram(
-                  `🟡 <b>DRY RUN — Auto-Sell (Rug Signal): ${pos.symbol}</b>\n\n` +
-                  `📊 PNL: ${closed.pnl >= 0 ? '+' : ''}${closed.pnl.toFixed(4)} SOL (${closed.pnlPct}%)\n` +
-                  `📝 Reason: ${rugResult.signals.join(', ')}`
-                );
-              } else {
-                try {
-                  const result = await sellAll(pos.tokenMint, autoConfig.walletLabel, 500);
-                  if (result.success) {
-                    const closed = closePosition(pos.tokenMint, result.outputSol, result.signature, 'rug_signal');
-                    setPostCloseLock(pos.tokenMint);
-                    releaseSellLock(pos.tokenMint);
-                    const emoji = closed.pnl >= 0 ? '🟢' : '🔴';
-                    await sendTelegram(
-                      `${emoji} <b>Auto-Sell (Rug Signal): ${pos.symbol}</b>\n\n` +
-                      `💰 Got: ${result.outputSol.toFixed(4)} SOL\n` +
-                      `📊 PNL: ${closed.pnl >= 0 ? '+' : ''}${closed.pnl.toFixed(4)} SOL (${closed.pnlPct}%)\n` +
-                      `📝 Reason: ${rugResult.signals.join(', ')}\n` +
-                      `🔗 <a href="https://solscan.io/tx/${result.signature}">TX</a>`
-                    );
-                  }
-                } catch (sellErr) {
-                  releaseSellLock(pos.tokenMint);
-                  console.error(`[AUTO] Rug sell failed: ${sellErr.message}`);
-                }
-              }
-            } catch (lockErr) {
-              releaseSellLock(pos.tokenMint);
-            }
-            continue;
-          }
-        } catch (rugErr) {
-          console.error(`[AUTO] Rug check error: ${rugErr.message}`);
-        }
-      }
+      // Rug detection moved to independent 3s loop (checkRugs)
 
       // Rug warning — PNL dropped below -90% (massive dump)
       if (pnlPct <= -90 && !pos.rugWarningSent) {
@@ -1165,7 +1092,7 @@ function startMonitor() {
   loadAutoConfig();
 
   const modeTag = autoConfig.mode === 'dry_run' ? ' [DRY RUN]' : ' [LIVE]';
-  console.log(`[AUTO] Monitor started${modeTag} (check every ${autoConfig.checkIntervalSec}s, trailing ${autoConfig.trailingDropPct}% from peak, Soft SL:-${autoConfig.softSlPct}%/${autoConfig.softSlWaitSec}s, Hard SL:-${autoConfig.hardSlPct}%, fast-check: bundler 3s + softSL 3s + liqDrain 10s)`);
+  console.log(`[AUTO] Monitor started${modeTag} (check every ${autoConfig.checkIntervalSec}s, trailing ${autoConfig.trailingDropPct}% from peak, Soft SL:-${autoConfig.softSlPct}%/${autoConfig.softSlWaitSec}s, Hard SL:-${autoConfig.hardSlPct}%, fast-check: bundler 3s + softSL 3s + liqDrain 10s + rug 3s)`);
 
   // Main monitor loop (PNL, trailing, SL, partial sells)
   async function tick() {
@@ -1329,6 +1256,78 @@ function startMonitor() {
     setTimeout(softSlTick, 3000);
   }
   setTimeout(softSlTick, 1500); // start after 1.5s (offset from bundler loop)
+
+  // Rug fast-check loop (3s independent — catches LP removal, holder exodus, etc.)
+  let rugRunning = false;
+  async function rugTick() {
+    if (rugRunning) return;
+    rugRunning = true;
+    try {
+      const isDryMode = autoConfig.mode === 'dry_run';
+      const allPos = isDryMode ? dryRun.getOpenDryPositions() : getOpenPositions();
+
+      for (const pos of allPos) {
+        if (!pos.gmgnSnapshot) continue;
+
+        // Rug check throttle (3s per position)
+        const now = Date.now();
+        const lastCheck = pos.lastRugCheck || 0;
+        if (now - lastCheck < 3000) continue;
+
+        if (!acquireSellLock(pos.tokenMint)) continue;
+        try {
+          const rugResult = await checkRugSignals(pos);
+          if (isDryMode) dryRun.updateDryPosition(pos.tokenMint, { lastRugCheck: now });
+          else updatePosition(pos.tokenMint, { lastRugCheck: now });
+
+          if (rugResult.isRug) {
+            console.log(`[RUG-FAST] 🚨 ${pos.symbol}: ${rugResult.signals.join(', ')}`);
+
+            // Get current quote for PNL
+            let rugQuoteSol = 0;
+            try {
+              const { getQuote: rugGetQuote, SOL_MINT: rugSol } = require('./trading');
+              const rugRaw = Math.floor(pos.remainingTokens * Math.pow(10, pos.decimals));
+              const rugQ = await rugGetQuote(pos.tokenMint, rugSol, rugRaw, 500);
+              rugQuoteSol = parseFloat(rugQ.outAmount) / 1e9;
+            } catch (_) {}
+
+            // Send alert
+            const curPnlPct = pos.solSpent > 0 ? (((rugQuoteSol + (pos.totalSolReceived || 0)) - pos.solSpent) / pos.solSpent * 100) : 0;
+            const rugAlertMsg = [
+              `🚨 <b>RUG SIGNAL DETECTED</b>`,
+              ``,
+              `Token: <b>${pos.symbol || 'Unknown'}</b>`,
+              `CA: <code>${pos.tokenMint}</code>`,
+              `Entry: ${pos.solSpent?.toFixed(4) || '?'} SOL`,
+              `PNL: ${curPnlPct.toFixed(1)}%`,
+              ``,
+              `⚠️ Signals:`,
+              ...rugResult.signals.map(s => `• ${s}`),
+              ``,
+              `Selling immediately...`,
+            ].join('\n');
+            sendTelegram(rugAlertMsg, { parse_mode: 'HTML' }).catch(() => {});
+
+            // Execute sell via executeFullExit (handles dry/live, sell lock, notifications)
+            releaseSellLock(pos.tokenMint); // release before executeFullExit which re-acquires
+            await executeFullExit(pos, `rug_signal: ${rugResult.signals.join(', ')}`, rugQuoteSol, { lockHeld: false });
+            continue;
+          }
+          releaseSellLock(pos.tokenMint);
+        } catch (e) {
+          releaseSellLock(pos.tokenMint);
+          console.error(`[RUG-FAST] ${pos.symbol}: ${e.message?.slice(0, 50)}`);
+        }
+      }
+    } catch (e) {
+      console.error('[RUG-FAST] Loop error:', e.message);
+    } finally {
+      rugRunning = false;
+    }
+    setTimeout(rugTick, 3000);
+  }
+  setTimeout(rugTick, 2000); // start after 2s (offset from other loops)
 
   // Bundler fast loop (3s independent — catches bursts before dump)
   async function bundlerTick() {
