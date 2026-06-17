@@ -550,10 +550,12 @@ async function executeFullExit(pos, reason, quoteSolOut = 0, { lockHeld = false 
         const isRug = (closed.pnlPct || 0) <= -80;
         const emoji = (closed.pnl || 0) >= 0 ? '🟢' : (isRug ? '💀' : '🔴');
         const header = isRug ? `💀 <b>RUG — ${pos.symbol}</b>` : `${emoji} <b>Auto-Sell (${reasonStr}): ${pos.symbol}</b>`;
+        const totalReceived = closed.solReceived || result.outputSol || 0;
+        const hasPartial = (pos.totalSolReceived || 0) > 0;
         await sendTelegram(
           `${header}\n\n` +
-          `💰 Got: ${(result.outputSol || 0).toFixed(4)} SOL\n` +
-          `📊 PNL: ${(closed.pnl || 0) >= 0 ? '+' : ''}${(closed.pnl || 0).toFixed(4)} SOL (${closed.pnlPct || 0}%)\n` +
+          (hasPartial ? `💰 Total: ${totalReceived.toFixed(4)} SOL (exit: ${(result.outputSol || 0).toFixed(4)})\n` : `💰 Got: ${totalReceived.toFixed(4)} SOL\n`) +
+          `📊 PNL: ${(closed.pnl || 0) >= 0 ? '+' : ''}${(closed.pnl || 0).toFixed(4)} SOL (${(closed.pnlPct || 0) >= 0 ? '+' : ''}${(closed.pnlPct || 0).toFixed(1)}%)\n` +
           `📝 Reason: ${reasonStr}\n` +
           `📈 Peak was: +${pos.peakPnlPct ?? '?'}%\n\n` +
           `🔗 <a href="https://solscan.io/tx/${result.signature}">TX</a>`,
