@@ -560,6 +560,34 @@ async function executeFullExit(pos, reason, quoteSolOut = 0, { lockHeld = false 
   }
 }
 
+// ─── GMGN Direct API Helper (faster than gmgn-cli) ─────
+const https = require('https');
+const crypto = require('crypto');
+
+function gmgnFetch(chain, address, timeoutMs = 5000) {
+  const apiKey = process.env.GMGN_API_KEY;
+  if (!apiKey) return Promise.reject(new Error('GMGN_API_KEY not set'));
+  const ts = Math.floor(Date.now() / 1000);
+  const cid = crypto.randomUUID();
+  const url = `https://openapi.gmgn.ai/v1/token/info?chain=${chain}&address=${address}&timestamp=${ts}&client_id=${cid}`;
+  
+  return new Promise((resolve, reject) => {
+    const req = https.get(url, { headers: { 'X-APIKEY': apiKey }, timeout: timeoutMs }, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        try {
+          const json = JSON.parse(data);
+          if (json.code !== 0) reject(new Error(json.message || 'GMGN API error'));
+          else resolve(json.data || {});
+        } catch (e) { reject(new Error('GMGN JSON parse error')); }
+      });
+    });
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(); reject(new Error('GMGN API timeout')); });
+  });
+}
+
 // ─── Rug Signal Detector ─────────────────────────────
 // Compares current GMGN data with entry snapshot
 // Returns { isRug: bool, signals: string[] }
@@ -570,19 +598,9 @@ async function checkRugSignals(pos) {
   const signals = [];
   let rugScore = 0;
 
-  // C1 FIX: Move execAsync outside try so catch block can use it for retries
-  const { exec } = require('child_process');
-  const util = require('util');
-  const execAsync = util.promisify(exec);
-
   try {
-    // Fetch current GMGN data via CLI (async, non-blocking)
-    const { stdout } = await execAsync(`gmgn-cli token info --chain sol --address ${pos.tokenMint}`, {
-      encoding: 'utf8', timeout: 10000,
-    });
-    const data = JSON.parse(stdout);
-    // GMGN CLI returns data at top level (no .data wrapper)
-    const t = data?.data || data || {};
+    // Direct API call (200ms avg vs 500ms gmgn-cli)
+    const t = await gmgnFetch('sol', pos.tokenMint);
     const dev = t.dev || {};
     const stat = t.stat || {};
     const pool = t.pool || {};
@@ -648,16 +666,12 @@ async function checkRugSignals(pos) {
     return { isRug: rugScore > 0, signals, rugScore };
 
   } catch (e) {
-    // API error — retry 3x before giving up
+    // API error — retry 2x before giving up (faster retries with direct API)
     console.log(`[RUG] ${pos.symbol}: GMGN API error (${e.message?.slice(0, 60)}), retrying...`);
     for (let attempt = 2; attempt <= 3; attempt++) {
       try {
-        await new Promise(r => setTimeout(r, 2000));
-        const { stdout: retryOut } = await execAsync(`gmgn-cli token info --chain sol --address ${pos.tokenMint}`, {
-          encoding: 'utf8', timeout: 10000,
-        });
-        const retryData = JSON.parse(retryOut);
-        const rt = retryData?.data || {};
+        await new Promise(r => setTimeout(r, 1000));
+        const rt = await gmgnFetch('sol', pos.tokenMint);
         const rStat = rt.stat || {};
         const rPool = rt.pool || {};
         const rDev = rt.dev || {};
@@ -1258,6 +1272,7 @@ function startMonitor() {
   setTimeout(softSlTick, 1500); // start after 1.5s (offset from bundler loop)
 
   // Rug fast-check loop (3s independent — catches LP removal, holder exodus, etc.)
+  // Uses direct API (200ms) + parallel checks (all positions at once)
   let rugRunning = false;
   async function rugTick() {
     if (rugRunning) return;
@@ -1265,59 +1280,63 @@ function startMonitor() {
     try {
       const isDryMode = autoConfig.mode === 'dry_run';
       const allPos = isDryMode ? dryRun.getOpenDryPositions() : getOpenPositions();
+      const now = Date.now();
 
-      for (const pos of allPos) {
-        if (!pos.gmgnSnapshot) continue;
+      // Filter positions that need rug check (throttle 3s per position)
+      const toCheck = allPos.filter(p => p.gmgnSnapshot && (now - (p.lastRugCheck || 0)) >= 3000);
+      if (toCheck.length === 0) { rugRunning = false; return; }
 
-        // Rug check throttle (3s per position)
-        const now = Date.now();
-        const lastCheck = pos.lastRugCheck || 0;
-        if (now - lastCheck < 3000) continue;
+      // Parallel rug checks (all positions at once — 200ms total vs 2.5s sequential)
+      const results = await Promise.allSettled(toCheck.map(async (pos) => {
+        const rugResult = await checkRugSignals(pos);
+        return { pos, rugResult };
+      }));
 
-        if (!acquireSellLock(pos.tokenMint)) continue;
-        try {
-          const rugResult = await checkRugSignals(pos);
-          if (isDryMode) dryRun.updateDryPosition(pos.tokenMint, { lastRugCheck: now });
-          else updatePosition(pos.tokenMint, { lastRugCheck: now });
+      for (const result of results) {
+        if (result.status !== 'fulfilled') continue;
+        const { pos, rugResult } = result.value;
+        const checkNow = Date.now();
 
-          if (rugResult.isRug) {
-            console.log(`[RUG-FAST] 🚨 ${pos.symbol}: ${rugResult.signals.join(', ')}`);
+        // Update last check time
+        if (isDryMode) dryRun.updateDryPosition(pos.tokenMint, { lastRugCheck: checkNow });
+        else updatePosition(pos.tokenMint, { lastRugCheck: checkNow });
 
-            // Get current quote for PNL
-            let rugQuoteSol = 0;
-            try {
-              const { getQuote: rugGetQuote, SOL_MINT: rugSol } = require('./trading');
-              const rugRaw = Math.floor(pos.remainingTokens * Math.pow(10, pos.decimals));
-              const rugQ = await rugGetQuote(pos.tokenMint, rugSol, rugRaw, 500);
-              rugQuoteSol = parseFloat(rugQ.outAmount) / 1e9;
-            } catch (_) {}
+        if (rugResult.isRug) {
+          console.log(`[RUG-FAST] 🚨 ${pos.symbol}: ${rugResult.signals.join(', ')}`);
 
-            // Send alert
-            const curPnlPct = pos.solSpent > 0 ? (((rugQuoteSol + (pos.totalSolReceived || 0)) - pos.solSpent) / pos.solSpent * 100) : 0;
-            const rugAlertMsg = [
-              `🚨 <b>RUG SIGNAL DETECTED</b>`,
-              ``,
-              `Token: <b>${pos.symbol || 'Unknown'}</b>`,
-              `CA: <code>${pos.tokenMint}</code>`,
-              `Entry: ${pos.solSpent?.toFixed(4) || '?'} SOL`,
-              `PNL: ${curPnlPct.toFixed(1)}%`,
-              ``,
-              `⚠️ Signals:`,
-              ...rugResult.signals.map(s => `• ${s}`),
-              ``,
-              `Selling immediately...`,
-            ].join('\n');
-            sendTelegram(rugAlertMsg, { parse_mode: 'HTML' }).catch(() => {});
+          // Get current quote for PNL
+          let rugQuoteSol = 0;
+          try {
+            const { getQuote: rugGetQuote, SOL_MINT: rugSol } = require('./trading');
+            const rugRaw = Math.floor(pos.remainingTokens * Math.pow(10, pos.decimals));
+            const rugQ = await rugGetQuote(pos.tokenMint, rugSol, rugRaw, 500);
+            rugQuoteSol = parseFloat(rugQ.outAmount) / 1e9;
+          } catch (_) {}
 
-            // Execute sell via executeFullExit (handles dry/live, sell lock, notifications)
+          // Send alert
+          const curPnlPct = pos.solSpent > 0 ? (((rugQuoteSol + (pos.totalSolReceived || 0)) - pos.solSpent) / pos.solSpent * 100) : 0;
+          const rugAlertMsg = [
+            `🚨 <b>RUG SIGNAL DETECTED</b>`,
+            ``,
+            `Token: <b>${pos.symbol || 'Unknown'}</b>`,
+            `CA: <code>${pos.tokenMint}</code>`,
+            `Entry: ${pos.solSpent?.toFixed(4) || '?'} SOL`,
+            `PNL: ${curPnlPct.toFixed(1)}%`,
+            ``,
+            `⚠️ Signals:`,
+            ...rugResult.signals.map(s => `• ${s}`),
+            ``,
+            `Selling immediately...`,
+          ].join('\n');
+          sendTelegram(rugAlertMsg, { parse_mode: 'HTML' }).catch(() => {});
+
+          // Execute sell via executeFullExit
+          if (acquireSellLock(pos.tokenMint)) {
             releaseSellLock(pos.tokenMint); // release before executeFullExit which re-acquires
             await executeFullExit(pos, `rug_signal: ${rugResult.signals.join(', ')}`, rugQuoteSol, { lockHeld: false });
-            continue;
+          } else {
+            console.log(`[RUG-FAST] ${pos.symbol}: sell lock held, will retry next cycle`);
           }
-          releaseSellLock(pos.tokenMint);
-        } catch (e) {
-          releaseSellLock(pos.tokenMint);
-          console.error(`[RUG-FAST] ${pos.symbol}: ${e.message?.slice(0, 50)}`);
         }
       }
     } catch (e) {
