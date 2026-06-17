@@ -851,10 +851,10 @@ async function checkPositions() {
 
       // Bundler check moved to independent 3s loop (checkBundlers)
 
-      // Rug detection — check GMGN data changes every 30s
+      // Rug detection — check GMGN data changes every 10s
       const rugCheckNow = Date.now();
       const lastRugCheck = pos.lastRugCheck || 0;
-      if (rugCheckNow - lastRugCheck > 30000 && pos.gmgnSnapshot) {
+      if (rugCheckNow - lastRugCheck > 10000 && pos.gmgnSnapshot) {
         try {
           const rugResult = await checkRugSignals(pos);
           if (pos.isDryRun) dryRun.updateDryPosition(pos.tokenMint, { lastRugCheck: rugCheckNow });
