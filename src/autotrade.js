@@ -530,26 +530,42 @@ async function executeFullExit(pos, reason, quoteSolOut = 0, { lockHeld = false 
     const result = await sellAll(pos.tokenMint, autoConfig.walletLabel, 500);
 
     if (result.success) {
-      const closed = closePosition(pos.tokenMint, result.outputSol, result.signature, reasonStr);
-      setPostCloseLock(pos.tokenMint); // H4 FIX: AFTER successful sell
+      let closed;
+      try {
+        closed = closePosition(pos.tokenMint, result.outputSol, result.signature, reasonStr);
+      } catch (closeErr) {
+        // Race condition: rug-fast/bundler loop may have already closed this position
+        if (closeErr.message?.includes('No open position')) {
+          console.log(`[AUTO] ${pos.symbol}: position already closed by another loop, skipping`);
+          releaseSellLock(pos.tokenMint);
+          return { success: true, received: result.outputSol, reason: 'already_closed' };
+        }
+        throw closeErr; // re-throw unexpected errors
+      }
+      setPostCloseLock(pos.tokenMint); // H4 FIX: AFTER successful close
       releaseSellLock(pos.tokenMint); // C2 FIX
 
-      const isRug = closed.pnlPct <= -80;
-      const emoji = closed.pnl >= 0 ? '🟢' : (isRug ? '💀' : '🔴');
-      const header = isRug ? `💀 <b>RUG — ${pos.symbol}</b>` : `${emoji} <b>Auto-Sell (${reasonStr}): ${pos.symbol}</b>`;
-      await sendTelegram(
-        `${header}\n\n` +
-        `💰 Got: ${result.outputSol.toFixed(4)} SOL\n` +
-        `📊 PNL: ${closed.pnl >= 0 ? '+' : ''}${closed.pnl.toFixed(4)} SOL (${closed.pnlPct}%)\n` +
-        `📝 Reason: ${reasonStr}\n` +
-        `📈 Peak was: +${pos.peakPnlPct ?? '?'}%\n\n` +
-        `🔗 <a href="https://solscan.io/tx/${result.signature}">TX</a>`,
-        { reply_markup: { inline_keyboard: [
-          [{ text: '📊 Positions', callback_data: 'menu_positions' },
-           { text: '📈 PNL', callback_data: 'menu_pnl' }],
-          [{ text: '🏠 Menu', callback_data: 'menu_main' }],
-        ]} }
-      );
+      // Notification in try-catch so it doesn't break position state
+      try {
+        const isRug = (closed.pnlPct || 0) <= -80;
+        const emoji = (closed.pnl || 0) >= 0 ? '🟢' : (isRug ? '💀' : '🔴');
+        const header = isRug ? `💀 <b>RUG — ${pos.symbol}</b>` : `${emoji} <b>Auto-Sell (${reasonStr}): ${pos.symbol}</b>`;
+        await sendTelegram(
+          `${header}\n\n` +
+          `💰 Got: ${(result.outputSol || 0).toFixed(4)} SOL\n` +
+          `📊 PNL: ${(closed.pnl || 0) >= 0 ? '+' : ''}${(closed.pnl || 0).toFixed(4)} SOL (${closed.pnlPct || 0}%)\n` +
+          `📝 Reason: ${reasonStr}\n` +
+          `📈 Peak was: +${pos.peakPnlPct ?? '?'}%\n\n` +
+          `🔗 <a href="https://solscan.io/tx/${result.signature}">TX</a>`,
+          { reply_markup: { inline_keyboard: [
+            [{ text: '📊 Positions', callback_data: 'menu_positions' },
+             { text: '📈 PNL', callback_data: 'menu_pnl' }],
+            [{ text: '🏠 Menu', callback_data: 'menu_main' }],
+          ]} }
+        );
+      } catch (notifyErr) {
+        console.error(`[AUTO] Notification failed for ${pos.symbol}: ${notifyErr.message}`);
+      }
       return { success: true, received: result.outputSol, pnl: closed.pnl, pnlPct: closed.pnlPct };
     }
   } catch (e) {
