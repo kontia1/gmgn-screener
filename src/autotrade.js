@@ -612,10 +612,13 @@ async function checkRugSignals(pos) {
       }
     }
 
-    // Signal 3: Liquidity drain (drop > 50% from entry)
-    // Skip if current liq = 0 AND entry liq < 10000 — likely pre-bond token with no DEX pool (false positive)
-    const isPreBond = curLiq === 0 && snap.liquidity < 10000;
-    if (snap.liquidity > 1000 && curLiq > 0) {
+    // Signal 3: Liquidity REMOVED (LP = $0) — instant rug
+    if (snap.liquidity > 1000 && curLiq === 0) {
+      signals.push(`Liquidity REMOVED ($${Math.round(snap.liquidity).toLocaleString()} → $0)`);
+      rugScore += 100;
+    }
+    // Signal 3b: Liquidity drain >50% (partial, still alive)
+    else if (snap.liquidity > 1000 && curLiq > 0) {
       const liqDrop = ((snap.liquidity - curLiq) / snap.liquidity) * 100;
       if (liqDrop > 50) {
         signals.push(`Liquidity dropped ${liqDrop.toFixed(0)}% ($${Math.round(snap.liquidity).toLocaleString()} → $${Math.round(curLiq).toLocaleString()})`);
@@ -641,8 +644,8 @@ async function checkRugSignals(pos) {
       rugScore += 15;
     }
 
-    // isRug if rugScore >= 30 (one strong signal or multiple weak)
-    return { isRug: rugScore >= 30, signals, rugScore };
+    // isRug if ANY signal fires (1 signal = instant close, don't wait)
+    return { isRug: rugScore > 0, signals, rugScore };
 
   } catch (e) {
     // API error — retry 3x before giving up
