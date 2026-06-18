@@ -985,6 +985,9 @@ async function checkPositions() {
       for (const action of actions) {
         if (action.type === 'partial') {
           await executePartialSell(pos, action, currentPrice);
+          // Reload pos after partial sell to get updated remainingTokens + totalSolReceived
+          const freshPos = pos.isDryRun ? dryRun.getOpenDryPositions().find(p => p.tokenMint === pos.tokenMint) : getPosition(pos.tokenMint);
+          if (freshPos) Object.assign(pos, freshPos);
         } else if (action.type === 'trailing') {
           await executeFullExit(pos, `trailing (peak +${action.peakPnl}%, dropped ${action.dropFromPeak}%)`, quoteSolOut);
           break; // position closed, skip remaining actions

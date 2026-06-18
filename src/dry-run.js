@@ -144,6 +144,8 @@ function closeDryPosition(tokenMint, solVirtual, reason = 'manual') {
     closedAt: new Date().toISOString(),
     closeReason: reason,
     isDryRun: true,
+    status: 'closed',
+    remainingTokens: 0,
   };
 
   const closedList = loadDryClosed();

@@ -158,6 +158,8 @@ function _closePosition(tokenMint, solReceived, txSignature, reason = 'manual') 
     closeTx: txSignature,
     closedAt: new Date().toISOString(),
     closeReason: reason,
+    status: 'closed',
+    remainingTokens: 0,
   };
 
   // Move to closed history
