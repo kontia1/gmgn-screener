@@ -146,9 +146,11 @@ function _closePosition(tokenMint, solReceived, txSignature, reason = 'manual') 
   const pos = positions[tokenMint];
   if (!pos) throw new Error(`No open position for ${tokenMint}`);
 
-  const totalReceived = pos.totalSolReceived + solReceived;
-  const pnl = totalReceived - pos.solSpent;
-  const pnlPct = ((totalReceived - pos.solSpent) / pos.solSpent * 100).toFixed(1);
+  const prevReceived = pos.totalSolReceived || 0;
+  const totalReceived = prevReceived + (solReceived || 0);
+  const spent = pos.solSpent || 0;
+  const pnl = totalReceived - spent;
+  const pnlPct = spent > 0 ? ((totalReceived - spent) / spent * 100) : 0;
 
   const closed = {
     ...pos,

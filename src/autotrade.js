@@ -3,7 +3,7 @@
  * Runs as background loop alongside bot + screener
  */
 const { buyToken, sellToken, sellAll, getQuote, SOL_MINT } = require('./trading');
-const { openPosition, closePosition, recordPartialSell, getOpenPositions, checkTpSl, calcPnl, updatePosition } = require('./positions');
+const { openPosition, closePosition, recordPartialSell, getOpenPositions, getPosition, checkTpSl, calcPnl, updatePosition } = require('./positions');
 const { getTokenBalance } = require('./wallet');
 const { gmgnTokenInfo, sendTelegram } = require('../lib/shared');
 const { autoBuyButtons } = require('./buttons');
@@ -547,15 +547,22 @@ async function executeFullExit(pos, reason, quoteSolOut = 0, { lockHeld = false 
 
       // Notification in try-catch so it doesn't break position state
       try {
-        const isRug = (closed.pnlPct || 0) <= -80;
-        const emoji = (closed.pnl || 0) >= 0 ? '🟢' : (isRug ? '💀' : '🔴');
+        // Defensive PNL recalculation — closed.pnl can be NaN if pos.totalSolReceived was undefined on disk
+        const exitSol = result.outputSol || 0;
+        const partialSol = closed.totalSolReceived || pos.totalSolReceived || 0;
+        const totalRecv = (closed.solReceived && !isNaN(closed.solReceived)) ? closed.solReceived : (partialSol + exitSol);
+        const spent = closed.solSpent || pos.solSpent || 0;
+        const safePnl = (closed.pnl !== undefined && !isNaN(closed.pnl)) ? closed.pnl : (totalRecv - spent);
+        const safePnlPct = (closed.pnlPct !== undefined && !isNaN(closed.pnlPct)) ? closed.pnlPct : (spent > 0 ? (safePnl / spent * 100) : 0);
+        const hasPartial = partialSol > 0;
+
+        const isRug = safePnlPct <= -80;
+        const emoji = safePnl >= 0 ? '🟢' : (isRug ? '💀' : '🔴');
         const header = isRug ? `💀 <b>RUG — ${pos.symbol}</b>` : `${emoji} <b>Auto-Sell (${reasonStr}): ${pos.symbol}</b>`;
-        const totalReceived = closed.solReceived || result.outputSol || 0;
-        const hasPartial = (pos.totalSolReceived || 0) > 0;
         await sendTelegram(
           `${header}\n\n` +
-          (hasPartial ? `💰 Total: ${totalReceived.toFixed(4)} SOL (exit: ${(result.outputSol || 0).toFixed(4)})\n` : `💰 Got: ${totalReceived.toFixed(4)} SOL\n`) +
-          `📊 PNL: ${(closed.pnl || 0) >= 0 ? '+' : ''}${(closed.pnl || 0).toFixed(4)} SOL (${(closed.pnlPct || 0) >= 0 ? '+' : ''}${(closed.pnlPct || 0).toFixed(1)}%)\n` +
+          (hasPartial ? `💰 Total: ${totalRecv.toFixed(4)} SOL (exit: ${exitSol.toFixed(4)})\n` : `💰 Got: ${totalRecv.toFixed(4)} SOL\n`) +
+          `📊 PNL: ${safePnl >= 0 ? '+' : ''}${safePnl.toFixed(4)} SOL (${safePnlPct >= 0 ? '+' : ''}${safePnlPct.toFixed(1)}%)\n` +
           `📝 Reason: ${reasonStr}\n` +
           `📈 Peak was: +${pos.peakPnlPct ?? '?'}%\n\n` +
           `🔗 <a href="https://solscan.io/tx/${result.signature}">TX</a>`,
@@ -572,6 +579,32 @@ async function executeFullExit(pos, reason, quoteSolOut = 0, { lockHeld = false 
     }
   } catch (e) {
     releaseSellLock(pos.tokenMint); // C2 FIX: Release on error
+    const msg = e.message || '';
+    if (msg.includes('NO_ROUTES_FOUND') || msg.includes('No routes found')) {
+      // Token is unsellable — close as dead token (0 SOL received) to stop retry spam
+      console.log(`[AUTO] 💀 ${pos.symbol}: NO_ROUTES during sell, closing as dead token`);
+      try {
+        closePosition(pos.tokenMint, 0, 'none', 'dead_token_no_routes');
+      } catch (closeErr) {
+        if (!closeErr.message?.includes('No open position')) throw closeErr;
+      }
+      setPostCloseLock(pos.tokenMint);
+      const totalReceived = pos.totalSolReceived || 0;
+      const actualLoss = (pos.solSpent || 0) - totalReceived;
+      const lossPct = pos.solSpent > 0 ? (actualLoss / pos.solSpent * 100) : 100;
+      const rugMsg = [
+        `💀 <b>RUG — ${pos.symbol}</b>`,
+        ``,
+        `Token: <b>${pos.symbol || 'Unknown'}</b>`,
+        `CA: <code>${pos.tokenMint}</code>`,
+        `Entry: ${pos.solSpent?.toFixed(4) || '?'} SOL`,
+        totalReceived > 0 ? `Recovered: ${totalReceived.toFixed(4)} SOL (partial sells)` : null,
+        `Loss: <b>-${actualLoss.toFixed(4)} SOL (-${lossPct.toFixed(1)}%)</b>`,
+        `Reason: NO_ROUTES_FOUND — token dead (triggered by: ${reasonStr})`,
+      ].filter(Boolean).join('\n');
+      sendTelegram(rugMsg, { parse_mode: 'HTML' }).catch(() => {});
+      return { success: false, reason: 'dead_token' };
+    }
     console.error(`[AUTO] Full exit failed: ${e.message}`);
     await sendTelegram(`❌ Auto-Sell failed: ${pos.symbol}\n${e.message}`);
     return { success: false, reason: 'sell_error', error: e.message };
@@ -1220,9 +1253,34 @@ function startMonitor() {
           const curLiq = parseFloat(rawLiq);
           const entryLiq = pos.gmgnSnapshot.liquidity;
 
-          // Skip if API returns null/undefined/NaN/0/tiny (API glitch, not real rug)
-          if (!Number.isFinite(curLiq) || curLiq < 100 || entryLiq <= 0) {
-            if (curLiq < 100 && curLiq >= 0) console.log(`[LIQ-DRAIN] ${pos.symbol}: GMGN returned liq=$${curLiq}, likely API glitch — skipping`);
+          // Skip if API returns null/undefined/NaN (actual API failure)
+          if (!Number.isFinite(curLiq) || entryLiq <= 0) {
+            if (curLiq === 0) {
+              // $0 liquidity = real rug, NOT API glitch — trigger instant exit
+              console.log(`[LIQ-DRAIN] ${pos.symbol}: liquidity dropped to $0 — RUG, instant exit`);
+              const { closePosition: liqClose } = require('./positions');
+              try {
+                const closeResult = await sellAll(pos.tokenMint, autoConfig.walletLabel, 500);
+                if (closeResult.success) {
+                  const closed = liqClose(pos.tokenMint, closeResult.outputSol, closeResult.signature, 'liq_drain_100%');
+                  setPostCloseLock(pos.tokenMint);
+                  releaseSellLock(pos.tokenMint);
+                  const emoji = (closed.pnl || 0) >= 0 ? '🟢' : '🔴';
+                  sendTelegram(`${emoji} <b>Auto-Sell (Liq Drain 100%): ${pos.symbol}</b>\n\n💰 Got: ${(closeResult.outputSol || 0).toFixed(4)} SOL\n📊 PNL: ${(closed.pnl || 0) >= 0 ? '+' : ''}${(closed.pnl || 0).toFixed(4)} SOL (${(closed.pnlPct || 0)}%)\n🔗 <a href="https://solscan.io/tx/${closeResult.signature}">TX</a>`).catch(() => {});
+                } else {
+                  // Can't sell — close as loss
+                  const closed = liqClose(pos.tokenMint, 0, '', 'liq_drain_no_routes');
+                  setPostCloseLock(pos.tokenMint);
+                  releaseSellLock(pos.tokenMint);
+                  sendTelegram(`🔴 <b>Auto-Close (Liq Drain + No Routes): ${pos.symbol}</b>\n\n📊 PNL: -${(pos.solSpent || 0).toFixed(4)} SOL (total loss)\n📝 Token is dead — position closed`).catch(() => {});
+                }
+              } catch (sellErr) {
+                console.error(`[LIQ-DRAIN] ${pos.symbol}: sell failed: ${sellErr.message}`);
+                releaseSellLock(pos.tokenMint);
+              }
+              continue;
+            }
+            console.log(`[LIQ-DRAIN] ${pos.symbol}: GMGN returned invalid liq (NaN/undefined) — skipping`);
             releaseSellLock(pos.tokenMint); continue;
           }
 
