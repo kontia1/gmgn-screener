@@ -1581,13 +1581,31 @@ function startMonitor() {
         const curPnlPct = pos.solSpent > 0 ? (((rugQuoteSol + (pos.totalSolReceived || 0)) - pos.solSpent) / pos.solSpent * 100) : 0;
 
         // Hard SL enforcement at 1s frequency (supplements checkPositions 15s cycle)
+        // Consecutive confirmation: require 2 consecutive hits to prevent false positives from quote flukes
         const rtHardSlPct = pos.hardSlPct || autoConfig.hardSlPct || autoConfig.slPct || 25;
         if (rugQuoteSol > 0 && curPnlPct <= -rtHardSlPct) {
-          if (acquireSellLock(pos.tokenMint)) {
-            console.log(`[RUG-FAST] ⛔ ${pos.symbol}: Hard SL at ${curPnlPct.toFixed(1)}% (≤-${rtHardSlPct}%) — 1s enforce`);
-            await executeFullExit(pos, `HARD SL (fast, ${curPnlPct.toFixed(1)}%)`, rugQuoteSol, { lockHeld: true });
+          const now = Date.now();
+          const prevHit = pos._hardSlFastHit || 0;
+          if (now - prevHit > 3000) {
+            // First hit — record timestamp, wait for confirmation on next tick
+            if (isDryMode) dryRun.updateDryPosition(pos.tokenMint, { _hardSlFastHit: now });
+            else updatePosition(pos.tokenMint, { _hardSlFastHit: now });
+            console.log(`[RUG-FAST] ⚠️ ${pos.symbol}: Hard SL candidate ${curPnlPct.toFixed(1)}% (≤-${rtHardSlPct}%) — confirming next tick...`);
+          } else {
+            // Confirmed hit (within 3s) — execute
+            if (acquireSellLock(pos.tokenMint)) {
+              console.log(`[RUG-FAST] ⛔ ${pos.symbol}: Hard SL CONFIRMED ${curPnlPct.toFixed(1)}% (≤-${rtHardSlPct}%) — 1s enforce`);
+              await executeFullExit(pos, `HARD SL (fast, ${curPnlPct.toFixed(1)}%)`, rugQuoteSol, { lockHeld: true });
+            }
           }
           continue;
+        } else if (rugQuoteSol > 0) {
+          // Price recovered above hard SL — clear confirmation flag
+          if (pos._hardSlFastHit) {
+            if (isDryMode) dryRun.updateDryPosition(pos.tokenMint, { _hardSlFastHit: 0 });
+            else updatePosition(pos.tokenMint, { _hardSlFastHit: 0 });
+            console.log(`[RUG-FAST] ✅ ${pos.symbol}: Hard SL candidate recovered (${curPnlPct.toFixed(1)}% > -${rtHardSlPct}%) — cleared`);
+          }
         }
 
         const rugLevel = rugResult.rugLevel || (rugResult.isRug ? 'exit' : 'safe');
