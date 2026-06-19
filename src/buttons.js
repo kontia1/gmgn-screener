@@ -1899,6 +1899,17 @@ async function handleSellButton(chatId, mintPrefix, pct) {
       });
     } else {
       dryRun.recordDryPartialSell(pos.tokenMint, tokensToSell, virtualSol, `button_${pct}pct`);
+      // TRAILING TP FIX: Reset peak reference to remaining-only values after partial sell
+      const dryBtnPrice = tokensToSell > 0 ? virtualSol / tokensToSell : 0;
+      const dryBtnPos = dryRun.getDryPosition(pos.tokenMint);
+      if (dryBtnPos && dryBtnPrice > 0) {
+        const dryBtnRemainingPnlPct = ((dryBtnPrice / dryBtnPos.entryPrice) - 1) * 100;
+        dryRun.updateDryPosition(pos.tokenMint, {
+          peakPrice: dryBtnPrice,
+          peakPnlPct: parseFloat(dryBtnRemainingPnlPct.toFixed(1)),
+          _partialSellReset: true,
+        });
+      }
       await tgApi('sendMessage', {
         chat_id: chatId,
         text: `🟡 <b>DRY RUN — Sell ${pct}% ${pos.symbol}</b>\n\n📦 Would sell: ${tokensToSell.toFixed(2)} tokens\n💰 Would get: ~${virtualSol.toFixed(4)} SOL`,
@@ -1923,6 +1934,17 @@ async function handleSellButton(chatId, mintPrefix, pct) {
         require('./autotrade').setPostCloseLock(pos.tokenMint);
       } else {
         positions.recordPartialSell(pos.tokenMint, sellAmount, result.outputSol, result.signature, `button_${pct}pct`);
+        // TRAILING TP FIX: Reset peak reference to remaining-only values after partial sell
+        const btnPrice = sellAmount > 0 ? result.outputSol / sellAmount : 0;
+        const btnPos = positions.getPosition(pos.tokenMint);
+        if (btnPos && btnPrice > 0) {
+          const btnRemainingPnlPct = ((btnPrice / btnPos.entryPrice) - 1) * 100;
+          positions.updatePosition(pos.tokenMint, {
+            peakPrice: btnPrice,
+            peakPnlPct: parseFloat(btnRemainingPnlPct.toFixed(1)),
+            _partialSellReset: true,
+          });
+        }
       }
       await tgApi('sendMessage', {
         chat_id: chatId,

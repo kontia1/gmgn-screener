@@ -197,7 +197,11 @@ function _checkTpSl(pos, currentPrice) {
   // Update peak price in-memory (no full load+save cycle)
   if (currentPrice > (pos.peakPrice || 0)) {
     pos.peakPrice = currentPrice;
-    pos.peakPnlPct = pnl.pnlPct;
+    // TRAILING TP FIX: After partial sell reset, use remaining-only PNL (not total with realized gains)
+    // This ensures the trailing TP tracks the REMAINING tokens' price action, not inflated total PNL
+    pos.peakPnlPct = pos._partialSellReset
+      ? ((currentPrice / pos.entryPrice) - 1) * 100
+      : pnl.pnlPct;
     peakDirty = true;
   }
 

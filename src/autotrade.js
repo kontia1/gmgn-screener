@@ -469,6 +469,17 @@ async function executePartialSell(pos, partial, currentPrice) {
       dryRun.updateDryPosition(freshPos.tokenMint, { partialSells: updatedPartials });
     }
 
+    // TRAILING TP FIX: Reset peak reference to remaining-only values after partial sell
+    // Previously peakPnlPct included totalSolReceived (realized gains), inflating the peak.
+    // Now we reset to per-token PNL so trailing TP tracks only the remaining tokens' price action.
+    const dryRemainingPnlPct = ((currentPrice / freshPos.entryPrice) - 1) * 100;
+    dryRun.updateDryPosition(freshPos.tokenMint, {
+      peakPrice: currentPrice,
+      peakPnlPct: parseFloat(dryRemainingPnlPct.toFixed(1)),
+      _partialSellReset: true,
+    });
+    console.log(`[AUTO] ${freshPos.symbol}: Trailing TP peak reset after partial sell (remaining-only PNL: ${dryRemainingPnlPct.toFixed(1)}%)`);
+
     const updatedPos = dryRun.getDryPosition(freshPos.tokenMint) || newPos || freshPos;
     const pnl = dryRun.calcDryPnl(updatedPos, currentPrice);
     await sendTelegram(
@@ -496,6 +507,17 @@ async function executePartialSell(pos, partial, currentPrice) {
         );
         positions.updatePosition(freshPos.tokenMint, { partialSells: updatedPartials });
       }
+
+      // TRAILING TP FIX: Reset peak reference to remaining-only values after partial sell
+      // Previously peakPnlPct included totalSolReceived (realized gains), inflating the peak.
+      // Now we reset to per-token PNL so trailing TP tracks only the remaining tokens' price action.
+      const liveRemainingPnlPct = ((currentPrice / freshPos.entryPrice) - 1) * 100;
+      positions.updatePosition(freshPos.tokenMint, {
+        peakPrice: currentPrice,
+        peakPnlPct: parseFloat(liveRemainingPnlPct.toFixed(1)),
+        _partialSellReset: true,
+      });
+      console.log(`[AUTO] ${freshPos.symbol}: Trailing TP peak reset after partial sell (remaining-only PNL: ${liveRemainingPnlPct.toFixed(1)}%)`);
 
       const updatedPos = positions.getPosition(freshPos.tokenMint) || newPos || freshPos;
       const pnl = calcPnl(updatedPos, currentPrice);
@@ -1104,7 +1126,12 @@ async function checkPositions() {
       }
       // Update peak
       if (currentPrice > (pos.peakPrice || 0)) {
-        const peakUpdate = { peakPrice: currentPrice, peakPnlPct: parseFloat(pnlPct.toFixed(1)) };
+        // TRAILING TP FIX: After partial sell reset, use remaining-only PNL (not total with realized gains)
+        // This ensures the trailing TP tracks the REMAINING tokens' price action, not inflated total PNL
+        const effectivePnlPct = pos._partialSellReset
+          ? ((currentPrice / pos.entryPrice) - 1) * 100
+          : pnlPct;
+        const peakUpdate = { peakPrice: currentPrice, peakPnlPct: parseFloat(effectivePnlPct.toFixed(1)) };
         if (pos.isDryRun) dryRun.updateDryPosition(pos.tokenMint, peakUpdate);
         else updatePosition(pos.tokenMint, peakUpdate);
       }
