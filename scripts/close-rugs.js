@@ -86,7 +86,7 @@ async function main() {
       const totalValueSol = solOut + (pos.totalSolReceived || 0);
       const pnlPct = pos.solSpent > 0 ? ((totalValueSol - pos.solSpent) / pos.solSpent * 100) : -100;
 
-      if (pnlPct <= -80) {
+      if (pnlPct <= -50) {
         if (DRY_RUN) {
           console.log(`🔴 ${short} — rug (${pnlPct.toFixed(1)}%), would sell`);
         } else {

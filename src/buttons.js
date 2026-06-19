@@ -1160,9 +1160,10 @@ async function handleCloseRugs(chatId) {
     try {
       const quote = await getQuote(pos.tokenMint, SOL_MINT, rawAmount, 500);
       const solOut = parseFloat(quote.outAmount) / 1e9;
-      const pnlPct = pos.solSpent > 0 ? ((solOut - pos.solSpent) / pos.solSpent * 100) : -100;
+      const totalReceived = (pos.totalSolReceived || 0) + solOut;
+      const pnlPct = pos.solSpent > 0 ? ((totalReceived - pos.solSpent) / pos.solSpent * 100) : -100;
 
-      if (pnlPct <= -80) {
+      if (pnlPct <= -50) {
         // Rug — sell and close
         try {
           const result = await sellAll(pos.tokenMint, 'default', 500);

@@ -83,6 +83,7 @@ function _openPosition(tokenMint, symbol, entryPrice, solSpent, tokenAmount, dec
 
     // TP/SL
     slPct: opts.slPct || 50,
+    hardSlPct: opts.hardSlPct || undefined,
 
     // Trailing TP
     trailingEnabled: opts.trailingEnabled !== false,

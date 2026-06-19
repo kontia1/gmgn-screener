@@ -73,7 +73,7 @@ async function getSwapTx(quote, userPublicKey, priorityFeeLamports = 50000) {
 }
 
 // ─── Buy Token (SOL → Token) ───────────────────────────
-async function buyToken(tokenMint, solAmount, walletLabel = 'default', slippageBps = 300) {
+async function buyToken(tokenMint, solAmount, walletLabel = 'default', slippageBps = 300, { _isRetry = false } = {}) {
   const keypair = getKeypair(walletLabel);
   const conn = getConnection();
 
@@ -85,6 +85,20 @@ async function buyToken(tokenMint, solAmount, walletLabel = 'default', slippageB
   if (!quote || !quote.outAmount) throw new Error('Empty quote');
   const outAmount = quote.outAmount;
   console.log(`[TRADE] Quote: ${outAmount} tokens (price impact: ${quote.priceImpactPct}%)`);
+
+  // Pre-buy validation: price impact threshold (max 10%)
+  const priceImpact = parseFloat(quote.priceImpactPct || '0');
+  if (priceImpact > 10) {
+    console.error(`[TRADE] REJECTED: price impact ${priceImpact.toFixed(2)}% exceeds 10% threshold for ${tokenMint}`);
+    throw new Error(`Price impact too high (${priceImpact.toFixed(2)}%), skipping buy to protect from excessive slippage`);
+  }
+
+  // Pre-buy validation: outAmount sanity check — output must be > 0
+  const outAmountNum = parseFloat(outAmount || '0');
+  if (outAmountNum <= 0) {
+    console.error(`[TRADE] REJECTED: quote returned 0 output tokens for ${tokenMint} — token likely dead`);
+    throw new Error('Quote output is 0 — token pool likely dead or illiquid');
+  }
 
   // Get decimals from output token
   let decimals = 6;
@@ -101,11 +115,31 @@ async function buyToken(tokenMint, solAmount, walletLabel = 'default', slippageB
   const tx = VersionedTransaction.deserialize(txBuf);
   tx.sign([keypair]);
 
-  // Send
-  const sig = await conn.sendTransaction(tx, {
-    skipPreflight: true,
-    maxRetries: 3,
-  });
+  // Send — skipPreflight=false lets Solana simulate before submitting, catching error 6001 pre-flight
+  let sig;
+  try {
+    sig = await conn.sendTransaction(tx, {
+      skipPreflight: false,
+      maxRetries: 3,
+    });
+  } catch (sendErr) {
+    // Simulation failed — retry ONCE with a fresh quote (pool state may have changed)
+    console.log(`[TRADE] Simulation/rejection failed: ${sendErr.message} — retrying with fresh quote`);
+    const freshQuote = await getQuote(SOL_MINT, tokenMint, lamports, slippageBps);
+    if (!freshQuote || !freshQuote.outAmount) throw new Error('Fresh quote empty after retry');
+    const freshImpact = parseFloat(freshQuote.priceImpactPct || '0');
+    if (freshImpact > 10) {
+      throw new Error(`Retry quote price impact too high (${freshImpact.toFixed(2)}%)`);
+    }
+    const freshSwapResult = await getSwapTx(freshQuote, keypair.publicKey);
+    const freshTxBuf = Buffer.from(freshSwapResult.swapTransaction, 'base64');
+    const freshTx = VersionedTransaction.deserialize(freshTxBuf);
+    freshTx.sign([keypair]);
+    sig = await conn.sendTransaction(freshTx, {
+      skipPreflight: false,
+      maxRetries: 3,
+    });
+  }
   console.log(`[TRADE] TX sent: ${sig}`);
 
   // Confirm
@@ -115,8 +149,14 @@ async function buyToken(tokenMint, solAmount, walletLabel = 'default', slippageB
   // Check if TX actually succeeded on-chain
   const err = status?.err || status?.value?.err;
   if (err) {
-    console.error(`[TRADE] TX FAILED on-chain: ${sig}`, JSON.stringify(err));
-    throw new Error(`TX failed on-chain: ${JSON.stringify(err)}`);
+    const errStr = JSON.stringify(err);
+    // On-chain failure (e.g. 6001 ExceededSlippage) — retry ONCE with fresh quote
+    if (!_isRetry) {
+      console.log(`[TRADE] TX failed on-chain (${errStr}) — retrying with fresh quote`);
+      return await buyToken(tokenMint, solAmount, walletLabel, slippageBps, { _isRetry: true });
+    }
+    console.error(`[TRADE] TX FAILED on-chain (retry exhausted): ${sig}`, errStr);
+    throw new Error(`TX failed on-chain: ${errStr}`);
   }
 
   // Double-check: fetch TX to verify no instruction errors

@@ -63,6 +63,7 @@ function openDryPosition(tokenMint, symbol, entryPrice, solSpent, tokenAmount, d
 
     // TP/SL
     slPct: opts.slPct || 50,
+    hardSlPct: opts.hardSlPct || undefined,
 
     // Trailing TP
     trailingEnabled: opts.trailingEnabled !== false,

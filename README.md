@@ -207,6 +207,14 @@ Automated trading engine with multi-layer safety mechanisms.
 - Global buy lock: configurable cooldown per CA (source-agnostic)
 - Re-check before autoBuy (race condition fix)
 
+**Pre-Buy Validation (prevents wasted fees on dead tokens):**
+- **Price impact check** — rejects if price impact > 10% (pool likely drained)
+- **OutAmount sanity check** — rejects if output tokens ≤ 0 (dead pool)
+- **Liquidity recheck** — fetches current GMGN pool data before swap; rejects if liquidity dropped > 50% from scan time
+- **Preflight simulation** — Solana simulates TX before on-chain submission (saves ~0.000055 SOL on doomed swaps)
+- **Auto-retry** — on simulation or on-chain failure, retries once with fresh Jupiter quote
+- **Buy lock cleanup** — releases 30s pending lock immediately on failure
+
 **4-Layer Protection (scan-before-buy):**
 
 | Layer | Check | Timeout | Description |
@@ -226,14 +234,17 @@ Dual stop-loss system combining quick recovery protection with hard exit.
 
 **Soft SL:**
 - Triggers at configurable threshold (default: -20%)
-- Waits configurable duration for recovery (default: 15s)
+- Waits configurable duration for recovery (default: 30s)
 - If price recovers above threshold → reset, continue holding
 - If price stays below threshold → sell
+- Hard SL enforcement runs at 1s frequency during soft SL wait period
 
 **Hard SL:**
-- Triggers at configurable threshold (default: -35%)
+- Triggers at configurable threshold (default: -25%)
 - Instant sell — no waiting for recovery
 - Acts as ultimate safety net
+- **Dynamic threshold:** High-risk entries (entryRiskScore ≥ 60) get tighter hard SL (15%)
+- Entry risk score based on: entrapment, bundler rate, liquidity at buy time
 
 ---
 
@@ -264,17 +275,38 @@ Each level individually toggleable with configurable trigger PNL and sell percen
 
 ### 9. Rug Detection
 
-Per-position monitoring checks each open position every 30 seconds for rug signals.
+Real-time per-position monitoring with graduated response system. Runs independently at 1-second frequency via dedicated fast-check loop.
 
-**6 Rug Signals (scored 0-100):**
-- **Holder exodus** (30) — Holder count drops > 40% from entry
+**9 Rug Signals (scored 0-100):**
+- **Holder exodus** (30) — Holder count drops > 30% from entry
 - **Top10 consolidation** (30) — Top 10 holder rate spikes > 50% from entry
+- **Liquidity removal** (100) — LP fully removed ($0 from > $1K)
 - **Liquidity drain** (30) — Liquidity drops > 50% from entry
 - **Entrapment spike** (20) — Entrapment ratio rises above 15% (was < 5%)
 - **Creator concentration** (25) — Creator holds > 90% of supply
 - **Fresh wallets** (15) — > 95% fresh wallets (possible bot/fake wallets)
+- **Price drop (Jupiter)** (50) — Real-time price dropped > 40% from entry
+- **Price impact spike** (40) — Price impact grew > 3x in 60 seconds
 
-**Auto-Sell Threshold:** Score ≥ 30 → automatic sell + rug notification
+**Graduated Response (score-based):**
+
+| Score | Level | Action |
+|-------|-------|--------|
+| 10-29 | Watch | Log + console only |
+| 30-49 | Warn | Telegram alert, watching |
+| 50-74 | Partial | Sell 50% immediately |
+| 75+ | Exit | Full exit |
+
+**Fast-Check Loops (independent from main 10s cycle):**
+
+| Loop | Interval | Purpose |
+|------|----------|---------|
+| Bundler fast | 3s | Active bundler burst detection |
+| Soft SL fast | 3s | Hard SL enforcement during soft SL wait |
+| Liq drain | 10s | Liquidity collapse detection (≥50% drop = instant exit) |
+| Rug fast | 1s | Full rug signal check + Jupiter price drop + NO_ROUTES pre-check |
+
+**NO_ROUTES Pre-Check:** Before calling GMGN API, rug loop checks Jupiter for swap routes. If NO_ROUTES detected → token is dead → instant full exit. Catches unsellable tokens before expensive API calls.
 
 **API Error Handling:** Retries 3x on GMGN API failure. If all retries fail and position is > 30 minutes old, treats as suspicious (isRug = true). Absolute checks (creator hold >90%, top10 >90%, entrapment >90%) don't require snapshot comparison — they detect rugs even without historical data.
 
