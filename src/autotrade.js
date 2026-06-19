@@ -289,7 +289,7 @@ async function autoBuy(tokenData) {
         holders: tokenData.holder_count || 0,
         liquidity: tokenData.liquidity || 0,
         top10: tokenData.top_10_holder_rate || 0,
-        creatorHold: 0,
+        creatorHold: parseFloat(tokenData?.creator_hold_rate || 0),
         entrapment: tokenData.entrapment_ratio || 0,
         bundlerRate: tokenData.bundler_rate || 0,
         volume: tokenData.volume_24h || tokenData.volume || 0,
@@ -394,7 +394,7 @@ async function autoBuy(tokenData) {
           holders: tokenData.holder_count || 0,
           liquidity: tokenData.liquidity || 0,
           top10: tokenData.top_10_holder_rate || 0,
-          creatorHold: 0, // not available from trending, will be fetched
+          creatorHold: parseFloat(tokenData?.creator_hold_rate || 0),
           entrapment: tokenData.entrapment_ratio || 0,
           bundlerRate: tokenData.bundler_rate || 0,
           volume: tokenData.volume_24h || tokenData.volume || 0,
@@ -728,6 +728,14 @@ async function checkRugSignals(pos) {
   const signals = [];
   let rugScore = 0;
 
+  // FIX 2: Time-since-buy dampener — structural signals less reliable right after buy
+  const timeSinceBuySec = (Date.now() - (snap.snapshotAt || 0)) / 1000;
+  const timeDampener = timeSinceBuySec < 30 ? 0.2
+    : timeSinceBuySec < 60 ? 0.4
+    : timeSinceBuySec < 120 ? 0.7
+    : timeSinceBuySec < 300 ? 0.9
+    : 1.0;
+
   // Jupiter price check — fast price-drop detection before GMGN API call
   try {
     const rawAmount = Math.floor(pos.remainingTokens * Math.pow(10, pos.decimals || 6));
@@ -788,10 +796,10 @@ async function checkRugSignals(pos) {
       const top10Spike = ((curTop10 - snap.top10) / snap.top10) * 100;
       if (top10Spike > 30) {
         signals.push(`Top10 spiked ${top10Spike.toFixed(0)}% (${(snap.top10*100).toFixed(1)}% → ${(curTop10*100).toFixed(1)}%)`);
-        rugScore += 30;
+        rugScore += Math.round(30 * timeDampener); // FIX 2: structural signal dampened
       } else if (top10Spike > 20) {
         signals.push(`Top10 consolidating +${top10Spike.toFixed(0)}% — early warning`);
-        rugScore += 15;
+        rugScore += Math.round(15 * timeDampener); // FIX 2: structural signal dampened
       }
     }
 
@@ -835,6 +843,23 @@ async function checkRugSignals(pos) {
       }
     }
 
+    // FIX 6: Signal 5b — Rapid sell velocity spike (1m window)
+    const curSellVol1m = parseFloat(stat.sell_volume_1m || 0);
+    const prevSellVol1m = pos._prevSellVol1m || 0;
+    const prevSellVol1mTs = pos._prevSellVol1mTs || 0;
+    if (prevSellVol1m > 0 && prevSellVol1mTs > 0 && (Date.now() - prevSellVol1mTs) < 6000) {
+      const sellVolRatio = curSellVol1m / prevSellVol1m;
+      if (sellVolRatio > 8) {
+        signals.push(`Sell volume surged ${sellVolRatio.toFixed(1)}x in ${((Date.now() - prevSellVol1mTs)/1000).toFixed(0)}s — dump wave`);
+        rugScore += 30;
+      } else if (sellVolRatio > 4) {
+        signals.push(`Sell volume spike ${sellVolRatio.toFixed(1)}x — accelerating sells`);
+        rugScore += 15;
+      }
+    }
+    pos._prevSellVol1m = curSellVol1m;
+    pos._prevSellVol1mTs = Date.now();
+
     // Signal 6: Jupiter price impact (absolute + rate of change)
     const lastImpact = parseFloat(pos._lastPriceImpact || 0);
     const prevImpact = parseFloat(pos._prevPriceImpact || 0);
@@ -863,19 +888,45 @@ async function checkRugSignals(pos) {
     // Signal 7: Entrapment spike (was low, now high)
     if (curEntrapment > 0.15 && snap.entrapment < 0.05) {
       signals.push(`Entrapment spiked to ${(curEntrapment*100).toFixed(1)}% (was ${(snap.entrapment*100).toFixed(1)}%)`);
-      rugScore += 20;
+      rugScore += Math.round(20 * timeDampener); // FIX 2: structural signal dampened
     }
 
-    // Signal 8: Creator holds > 90% (massive concentration)
-    if (curCreatorHold > 0.90) {
-      signals.push(`Creator holds ${(curCreatorHold*100).toFixed(1)}% of supply`);
-      rugScore += 25;
+    // FIX 3: Signal 8 — Creator sell delta (replaced absolute hold check)
+    if (snap.creatorHold > 0 && curCreatorHold > 0) {
+      const creatorDrop = snap.creatorHold - curCreatorHold;
+      if (creatorDrop > 0.20) {
+        signals.push(`Creator dumped ${(creatorDrop*100).toFixed(1)}% (${(snap.creatorHold*100).toFixed(1)}% → ${(curCreatorHold*100).toFixed(1)}%)`);
+        rugScore += Math.round(40 * timeDampener); // structural, dampened
+      } else if (creatorDrop > 0.10) {
+        signals.push(`Creator sold ${(creatorDrop*100).toFixed(1)}% (${(snap.creatorHold*100).toFixed(1)}% → ${(curCreatorHold*100).toFixed(1)}%)`);
+        rugScore += Math.round(20 * timeDampener); // structural, dampened
+      } else if (curCreatorHold > 0.95 && timeSinceBuySec > 300) {
+        // Stubborn hold: creator still holds >95% after 5 min (no distribution = suspicious)
+        signals.push(`Creator stubborn hold ${(curCreatorHold*100).toFixed(1)}% after ${Math.floor(timeSinceBuySec/60)}m`);
+        rugScore += Math.round(15 * timeDampener); // structural, dampened
+      }
     }
 
     // Signal 9: All fresh wallets (> 95%)
     if (curFreshWallet > 0.95) {
       signals.push(`${(curFreshWallet*100).toFixed(0)}% fresh wallets`);
-      rugScore += 15;
+      rugScore += Math.round(15 * timeDampener); // FIX 2: structural signal dampened
+    }
+
+    // FIX 5: Combined signal correlation — multi-category signals are more reliable
+    const signalCategories = new Set();
+    for (const sig of signals) {
+      if (sig.includes('Holders')) signalCategories.add('holders');
+      if (sig.includes('Top10') || sig.includes('Creator') || sig.includes('creator')) signalCategories.add('concentration');
+      if (sig.includes('Liquidity') || sig.includes('liq') || sig.includes('LP')) signalCategories.add('liquidity');
+      if (sig.includes('Sell') || sig.includes('sells')) signalCategories.add('selling');
+      if (sig.includes('Price') || sig.includes('impact')) signalCategories.add('price');
+      if (sig.includes('Entrapment')) signalCategories.add('entrapment');
+    }
+    if (signalCategories.size >= 3) {
+      rugScore = Math.min(100, Math.round(rugScore * 1.4));
+    } else if (signalCategories.size >= 2) {
+      rugScore = Math.min(100, Math.round(rugScore * 1.2));
     }
 
     // Graduated response: watch(10-29) → warn(30-49) → partial(50-74) → exit(75+)
@@ -1253,6 +1304,36 @@ async function checkBundlers() {
         saveBundlerDetection(pos.tokenMint, pos.symbol, bundlerResult);
 
         if (bundlerResult.isBundler) {
+          // FIX 1: Bundler PNL Gate — don't panic-sell profitable positions
+          const bundlerPnlPct = pos.solSpent > 0 ? (((pos.totalSolReceived || 0) - pos.solSpent) / pos.solSpent * 100) : -100;
+          const bundlerAgeMs = Date.now() - (pos.gmgnSnapshot?.snapshotAt || pos.openedAt || Date.now());
+
+          if (bundlerPnlPct > 5) {
+            // Profitable: alert only, don't sell
+            console.log(`[BUNDLER] 👀 ${pos.symbol}: bundler detected but PNL +${bundlerPnlPct.toFixed(1)}% — alert only, NOT selling`);
+            const bundlerWatchMsg = [
+              `👀 <b>BUNDLER (Watch Only): ${pos.symbol}</b>`, ``,
+              `PNL: +${bundlerPnlPct.toFixed(1)}% — profitable, not selling`,
+              ``, `⚠️ Pattern: ${bundlerResult.details}`,
+              `Transfers: ${bundlerResult.transfers} | Payers: ${bundlerResult.uniquePayers}`,
+            ].join('\n');
+            sendTelegram(bundlerWatchMsg, { parse_mode: 'HTML' }).catch(() => {});
+            continue;
+          }
+          if (bundlerAgeMs < 180000 && bundlerPnlPct > -5) {
+            // Young position, not in deep loss: watch mode
+            console.log(`[BUNDLER] 👀 ${pos.symbol}: bundler detected, age ${(bundlerAgeMs/1000).toFixed(0)}s, PNL ${bundlerPnlPct.toFixed(1)}% — watch mode`);
+            const bundlerWatchMsg = [
+              `👀 <b>BUNDLER (Watch): ${pos.symbol}</b>`, ``,
+              `PNL: ${bundlerPnlPct.toFixed(1)}% — age ${(bundlerAgeMs/1000).toFixed(0)}s, monitoring`,
+              ``, `⚠️ Pattern: ${bundlerResult.details}`,
+              `Transfers: ${bundlerResult.transfers} | Payers: ${bundlerResult.uniquePayers}`,
+            ].join('\n');
+            sendTelegram(bundlerWatchMsg, { parse_mode: 'HTML' }).catch(() => {});
+            continue;
+          }
+          // Otherwise: proceed with sell (confirmed dump or old + losing position)
+
           // C2 FIX: Acquire sell lock to prevent concurrent sell from checkPositions
           if (!acquireSellLock(pos.tokenMint)) {
             console.log(`[BUNDLER] ${pos.symbol}: sell lock held, skipping (another sell in progress)`);
@@ -1638,12 +1719,32 @@ function startMonitor() {
         const rugLevel = rugResult.rugLevel || (rugResult.isRug ? 'exit' : 'safe');
 
         if (rugLevel === 'watch') {
+          // FIX 4: Clear rug confirmation if level dropped below partial
+          if (pos._rugConfLevel) {
+            const clearData = { _rugConfLevel: '', _rugConfTs: 0, _rugConfCount: 0 };
+            if (isDryMode) dryRun.updateDryPosition(pos.tokenMint, clearData);
+            else updatePosition(pos.tokenMint, clearData);
+          }
           console.log(`[RUG-FAST] 👀 ${pos.symbol}: watch (score ${rugResult.rugScore}) — ${rugResult.signals.join(', ')}`);
           continue;
         }
-        if (rugLevel === 'safe') continue;
+        if (rugLevel === 'safe') {
+          // FIX 4: Clear rug confirmation if level dropped
+          if (pos._rugConfLevel) {
+            const clearData = { _rugConfLevel: '', _rugConfTs: 0, _rugConfCount: 0 };
+            if (isDryMode) dryRun.updateDryPosition(pos.tokenMint, clearData);
+            else updatePosition(pos.tokenMint, clearData);
+          }
+          continue;
+        }
 
         if (rugLevel === 'warn') {
+          // FIX 4: Clear rug confirmation if level dropped below partial
+          if (pos._rugConfLevel) {
+            const clearData = { _rugConfLevel: '', _rugConfTs: 0, _rugConfCount: 0 };
+            if (isDryMode) dryRun.updateDryPosition(pos.tokenMint, clearData);
+            else updatePosition(pos.tokenMint, clearData);
+          }
           // Alert only — no sell, wait for escalation
           const lastWarnLevel = pos._rugWarnLevel || 'safe';
           if (lastWarnLevel === 'safe') {
@@ -1663,7 +1764,24 @@ function startMonitor() {
             console.log(`[RUG-FAST] ⚠️ ${pos.symbol}: warn (score ${rugResult.rugScore}) — ${rugResult.signals.join(', ')}`);
           }
         } else if (rugLevel === 'partial') {
-          // Sell 50% immediately — hedge while still sellable
+          // FIX 4: Consecutive confirmation — require 2 consecutive ticks at same level within 3s
+          const rugConfLevel = pos._rugConfLevel || '';
+          const rugConfTs = pos._rugConfTs || 0;
+          const rugConfCount = pos._rugConfCount || 0;
+          const confAge = Date.now() - rugConfTs;
+
+          if (rugConfLevel !== 'partial' || confAge > 3000 || rugConfCount >= 2) {
+            // First tick at this level, or timeout, or already confirmed — reset
+            if (isDryMode) dryRun.updateDryPosition(pos.tokenMint, { _rugConfLevel: 'partial', _rugConfTs: Date.now(), _rugConfCount: 1 });
+            else updatePosition(pos.tokenMint, { _rugConfLevel: 'partial', _rugConfTs: Date.now(), _rugConfCount: 1 });
+            console.log(`[RUG-FAST] ${pos.symbol}: partial (score ${rugResult.rugScore}) — confirming next tick...`);
+            continue;
+          }
+          // Second tick within 3s — CONFIRMED
+          if (isDryMode) dryRun.updateDryPosition(pos.tokenMint, { _rugConfCount: 2 });
+          else updatePosition(pos.tokenMint, { _rugConfCount: 2 });
+
+          // Sell 50% — hedge while still sellable
           if (!pos._rugPartialSold) {
             if (!acquireSellLock(pos.tokenMint)) {
               console.log(`[RUG-FAST] ${pos.symbol}: sell lock held, skipping partial`);
@@ -1696,6 +1814,23 @@ function startMonitor() {
             }
           }
         } else if (rugLevel === 'exit') {
+          // FIX 4: Consecutive confirmation for exit level
+          const rugConfLevel = pos._rugConfLevel || '';
+          const rugConfTs = pos._rugConfTs || 0;
+          const rugConfCount = pos._rugConfCount || 0;
+          const confAge = Date.now() - rugConfTs;
+
+          if (rugConfLevel !== 'exit' || confAge > 3000 || rugConfCount >= 2) {
+            // First tick at this level, or timeout, or already confirmed — reset
+            if (isDryMode) dryRun.updateDryPosition(pos.tokenMint, { _rugConfLevel: 'exit', _rugConfTs: Date.now(), _rugConfCount: 1 });
+            else updatePosition(pos.tokenMint, { _rugConfLevel: 'exit', _rugConfTs: Date.now(), _rugConfCount: 1 });
+            console.log(`[RUG-FAST] ${pos.symbol}: exit (score ${rugResult.rugScore}) — confirming next tick...`);
+            continue;
+          }
+          // Second tick within 3s — CONFIRMED
+          if (isDryMode) dryRun.updateDryPosition(pos.tokenMint, { _rugConfCount: 2 });
+          else updatePosition(pos.tokenMint, { _rugConfCount: 2 });
+
           // Full exit — sell everything
           console.log(`[RUG-FAST] 🚨 ${pos.symbol}: ${rugResult.signals.join(', ')}`);
           const rugAlertMsg = [
