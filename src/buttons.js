@@ -116,8 +116,6 @@ const MENU = {
       [{ text: `🔥 Hot: ${cfg.customFilters?.minHotLevel ?? 1}+`, callback_data: 'cfg_filter_minHotLevel' },
        { text: `👀 Visits: ${cfg.customFilters?.minVisitingCount ?? 20}+`, callback_data: 'cfg_filter_minVisitingCount' }],
       [{ text: `🤖 BotRate: <${((cfg.customFilters?.maxBotDegenRate ?? 0)*100).toFixed(0)}%`, callback_data: 'cfg_filter_maxBotDegenRate' },
-       { text: `🖼 ImgDup: ${cfg.customFilters?.maxImageDup ?? 0}`, callback_data: 'cfg_filter_maxImageDup' }],
-      [{ text: `🐦 TwLaunch: ${cfg.customFilters?.maxTwitterCreateTokenCount ?? 0}`, callback_data: 'cfg_filter_maxTwitterCreateTokenCount' },
        { text: `💧 InitLiq: ${fmtVol(cfg.customFilters?.minInitialLiquidity ?? 0)}`, callback_data: 'cfg_filter_minInitialLiquidity' }],
       [{ text: `📣 Boost: ${fmtVol(cfg.customFilters?.maxDexscrBoostFee ?? 0)}`, callback_data: 'cfg_filter_maxDexscrBoostFee' }],
       // ── Duplicate Filters section ──
@@ -218,8 +216,7 @@ const MENU = {
     maxBotDegen: { label: 'Max Bot Degen Count', hint: 'e.g. 300', min: 5, max: 50000 },
     // ── New quality filters ──
     maxBotDegenRate: { label: 'Max Bot Rate (%)', hint: 'e.g. 40 (0=OFF)', min: 0, max: 100 },
-    maxImageDup: { label: 'Max Logo Dup Count', hint: 'e.g. 50 (0=OFF)', min: 0, max: 10000 },
-    maxTwitterCreateTokenCount: { label: 'Max Twitter Token Launches', hint: 'e.g. 10 (0=OFF)', min: 0, max: 1000 },
+    // maxImageDup and maxTwitterCreateTokenCount moved to Duplicate Filters section
     minInitialLiquidity: { label: 'Min Initial Liquidity ($)', hint: 'e.g. 5000 (0=OFF)', min: 0, max: 1000000 },
     maxDexscrBoostFee: { label: 'Max DexScreener Boost ($)', hint: 'e.g. 1 (0=OFF)', min: 0, max: 100000 },
     // ── Duplicate filters ──
@@ -970,8 +967,7 @@ async function sendConfigMenu(chatId) {
         `  Entrap: &lt;${((cfg.customFilters?.maxEntrapment ?? 0.08)*100).toFixed(0)}%`,
         `  5m: ${cfg.customFilters?.minPriceChange5m ?? -10}%~${cfg.customFilters?.maxPriceChange5m ?? 35}% | 1h: &lt;${cfg.customFilters?.maxPriceChange1h ?? 150}%`,
         `  Hot: ${cfg.customFilters?.minHotLevel ?? 1}+ | Visits: ${cfg.customFilters?.minVisitingCount ?? 20}+`,
-        `  BotRate: &lt;${((cfg.customFilters?.maxBotDegenRate ?? 0)*100).toFixed(0)}% | ImgDup: ${cfg.customFilters?.maxImageDup ?? 0}`,
-        `  TwLaunch: ${cfg.customFilters?.maxTwitterCreateTokenCount ?? 0} | InitLiq: ${fmtVol(cfg.customFilters?.minInitialLiquidity ?? 0)}`,
+        `  BotRate: &lt;${((cfg.customFilters?.maxBotDegenRate ?? 0)*100).toFixed(0)}% | InitLiq: ${fmtVol(cfg.customFilters?.minInitialLiquidity ?? 0)}`,
         `  Boost: ${fmtVol(cfg.customFilters?.maxDexscrBoostFee ?? 0)}`,
       ] : []),
       ``,

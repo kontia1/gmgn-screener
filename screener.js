@@ -363,8 +363,7 @@ async function runScan() {
 
     // ── New quality filters (skip if 0 = OFF) ──
     if (CONFIG.maxBotDegenRate && botDegenRate > CONFIG.maxBotDegenRate) { stats.botrate++; continue; }
-    if (CONFIG.maxImageDup && imageDup > CONFIG.maxImageDup) { stats.imgdup++; continue; }
-    if (CONFIG.maxTwitterCreateTokenCount && twitterCreateCount > CONFIG.maxTwitterCreateTokenCount) { stats.twcreate++; continue; }
+    // maxImageDup and maxTwitterCreateTokenCount moved to Duplicate Filters section (line 373) to avoid conflict
     if (CONFIG.minInitialLiquidity && initialLiq < CONFIG.minInitialLiquidity) { stats.initliq++; continue; }
     if (CONFIG.maxDexscrBoostFee && boostFee > CONFIG.maxDexscrBoostFee) { stats.boost++; continue; }
 
