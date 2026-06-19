@@ -1629,9 +1629,10 @@ function startMonitor() {
   }
   setTimeout(softSlTick, 1500); // start after 1.5s (offset from bundler loop)
 
-  // Rug fast-check loop (3s independent — catches LP removal, holder exodus, etc.)
-  // Uses direct API (200ms) + parallel checks (all positions at once)
+  // Rug fast-check loop — OPTIMIZED: GMGN-first, Jupiter-on-demand, sequential with delay
+  // Reduces API calls from ~10/sec to ≤2/sec while keeping rug detection latency under 10s
   let rugRunning = false;
+  let _rugTickNum = 0; // tick counter for Jupiter rate-limiting
   async function rugTick() {
     if (rugRunning) return;
     rugRunning = true;
@@ -1640,81 +1641,170 @@ function startMonitor() {
       const allPos = isDryMode ? dryRun.getOpenDryPositions() : getOpenPositions();
       const now = Date.now();
 
-      // Filter positions that need rug check (throttle 1s per position — was 2s)
+      // Filter positions that need rug check (throttle 1s per position)
       const toCheck = allPos.filter(p => p.gmgnSnapshot && (now - (p.lastRugCheck || 0)) >= 1000);
-      // (removed early return — finally block handles rugRunning reset and reschedule)
 
-      // Parallel rug checks (all positions at once — 200ms total vs 2.5s sequential)
-      const results = await Promise.allSettled(toCheck.map(async (pos) => {
-        // NO_ROUTES pre-check — dead token detection before expensive GMGN API call
-        try {
-          const nrRaw = Math.floor(pos.remainingTokens * Math.pow(10, pos.decimals || 6));
-          if (nrRaw > 0) {
-            const nrQ = await getQuote(pos.tokenMint, SOL_MINT, nrRaw, 500);
-            pos._lastRugQuoteSol = parseFloat(nrQ.outAmount) / 1e9; // cache for checkRugSignals
-          }
-        } catch (nrErr) {
-          const nrMsg = nrErr.message || '';
-          if (nrMsg.includes('NO_ROUTES_FOUND') || nrMsg.includes('No routes found')) {
-            return { pos, dead: true };
-          }
+      // Sequential processing with 1500ms stagger between positions (replaces parallel Promise.allSettled)
+      // This naturally rate-limits: 5 positions × (500ms GMGN + 1500ms delay) = ~10s per cycle
+      for (let i = 0; i < toCheck.length; i++) {
+        _rugTickNum++;
+        const pos = toCheck[i];
+        await processOnePosition(pos, isDryMode);
+        // Stagger: 1500ms delay between positions (skip after last)
+        if (i < toCheck.length - 1) {
+          await new Promise(r => setTimeout(r, 1500));
         }
-        const rugResult = await checkRugSignals(pos);
-        return { pos, rugResult };
-      }));
+      }
+    } catch (e) {
+      console.error('[RUG-FAST] Loop error:', e.message);
+    } finally {
+      rugRunning = false;
+      setTimeout(rugTick, 2000); // 2s between cycles (was 1s — matched to staggered processing time)
+    }
+  }
 
-      for (const result of results) {
-        if (result.status !== 'fulfilled') continue;
-        const { pos, rugResult, dead } = result.value;
-        const checkNow = Date.now();
+  // Process a single position: GMGN-first, Jupiter conditional
+  async function processOnePosition(pos, isDryMode) {
+    const checkNow = Date.now();
 
-        // Update last check time
+    // STEP 1: GMGN fetch (primary data source — holders, liquidity, top10, creator, sell/buy vol, entrapment)
+    let gmgnData = null;
+    try {
+      gmgnData = await gmgnFetch('sol', pos.tokenMint);
+    } catch (gmgnErr) {
+      // GMGN failed — fall through to checkRugSignals which has its own retry logic
+      console.log(`[RUG-FAST] ${pos.symbol}: GMGN fetch failed (${gmgnErr.message?.slice(0, 50)}), will retry in checkRugSignals`);
+    }
+
+    // STEP 2: GMGN dead-token detection (replaces Jupiter NO_ROUTES pre-check)
+    // If holders=0 AND liquidity=0, token is dead — no Jupiter call needed
+    if (gmgnData) {
+      const gPool = gmgnData.pool || {};
+      const gHolders = gmgnData.holder_count || 0;
+      const gLiq = parseFloat(gPool.liquidity || 0);
+      if (gHolders === 0 && gLiq === 0) {
         if (isDryMode) dryRun.updateDryPosition(pos.tokenMint, { lastRugCheck: checkNow });
         else updatePosition(pos.tokenMint, { lastRugCheck: checkNow });
+        console.log(`[RUG-FAST] 💀 ${pos.symbol}: GMGN dead (0 holders, $0 liq) — triggering exit`);
+        if (acquireSellLock(pos.tokenMint)) {
+          await executeFullExit(pos, 'rug_gmgn_dead', 0, { lockHeld: true });
+        } else {
+          console.log(`[RUG-FAST] ${pos.symbol}: sell lock held, skipping dead exit`);
+        }
+        return;
+      }
+    }
 
-        // Dead token — no Jupiter routes means token is unsellable/dead
-        if (dead) {
+    // STEP 3: Jupiter getQuote — CONDITIONAL (reduces calls from 5/sec to ~1/sec)
+    // Strategy: call Jupiter every 3rd tick per position (staggered across positions)
+    // OR when GMGN data shows suspicious signals (red flag triggered)
+    let needJupiter = false;
+
+    // Every 3rd global tick — ensures price freshness even during calm periods
+    if (_rugTickNum % 3 === 0) {
+      needJupiter = true;
+    }
+
+    // GMGN red flags — need real-time price for hard SL + PNL accuracy
+    if (gmgnData) {
+      const gPool = gmgnData.pool || {};
+      const gStat = gmgnData.stat || {};
+      const gHolders = gmgnData.holder_count || 0;
+      const gLiq = parseFloat(gPool.liquidity || 0);
+      const gSellVol5m = parseFloat(gStat.sell_volume_5m || 0);
+      const gBuyVol5m = parseFloat(gStat.buy_volume_5m || 0);
+
+      const snap = pos.gmgnSnapshot;
+      // Holder drop > 10%
+      if (snap && snap.holders > 10 && gHolders > 0 && ((snap.holders - gHolders) / snap.holders) > 0.10) {
+        needJupiter = true;
+      }
+      // Liquidity drop > 15%
+      if (snap && snap.liquidity > 1000 && gLiq > 0 && ((snap.liquidity - gLiq) / snap.liquidity) > 0.15) {
+        needJupiter = true;
+      }
+      // Sell pressure > 3x buys
+      if (gSellVol5m > 0 && gBuyVol5m > 0 && gSellVol5m / gBuyVol5m > 3) {
+        needJupiter = true;
+      }
+      // Zero buys in 5m
+      if (gSellVol5m > 0 && gBuyVol5m === 0) {
+        needJupiter = true;
+      }
+    }
+
+    if (needJupiter) {
+      try {
+        const nrRaw = Math.floor(pos.remainingTokens * Math.pow(10, pos.decimals || 6));
+        if (nrRaw > 0 && pos.remainingTokens > 0) {
+          const nrQ = await getQuote(pos.tokenMint, SOL_MINT, nrRaw, 500);
+          pos._lastRugQuoteSol = parseFloat(nrQ.outAmount) / 1e9; // cache for checkRugSignals + hard SL
+          // Also update priceImpact for Signal 6 in checkRugSignals
+          const _impactUpdate = {
+            _prevPriceImpact: pos._lastPriceImpact || 0,
+            _prevPriceImpactTs: Date.now(),
+            _lastPriceImpact: parseFloat(nrQ.priceImpactPct || 0),
+          };
+          if (isDryMode) dryRun.updateDryPosition(pos.tokenMint, _impactUpdate);
+          else updatePosition(pos.tokenMint, _impactUpdate);
+        }
+      } catch (nrErr) {
+        const nrMsg = nrErr.message || '';
+        if (nrMsg.includes('NO_ROUTES_FOUND') || nrMsg.includes('No routes found')) {
+          // Dead token via Jupiter — update check time and exit
+          if (isDryMode) dryRun.updateDryPosition(pos.tokenMint, { lastRugCheck: checkNow });
+          else updatePosition(pos.tokenMint, { lastRugCheck: checkNow });
           console.log(`[RUG-FAST] 💀 ${pos.symbol}: NO_ROUTES — token dead, triggering exit`);
           if (acquireSellLock(pos.tokenMint)) {
             await executeFullExit(pos, 'rug_no_routes', 0, { lockHeld: true });
           } else {
             console.log(`[RUG-FAST] ${pos.symbol}: sell lock held, skipping no_routes exit`);
           }
-          continue;
+          return;
         }
+        // Other Jupiter errors — continue with GMGN-only data
+      }
+    }
 
-        // Reuse cached quote from pre-check + checkRugSignals (avoids duplicate Jupiter call)
-        const rugQuoteSol = pos._lastRugQuoteSol || 0;
-        const rugCurrentPrice = pos.remainingTokens > 0 ? rugQuoteSol / pos.remainingTokens : (pos.entryPrice || 0);
-        const curPnlPct = pos.solSpent > 0 ? (((rugQuoteSol + (pos.totalSolReceived || 0)) - pos.solSpent) / pos.solSpent * 100) : 0;
+    // Update check time
+    if (isDryMode) dryRun.updateDryPosition(pos.tokenMint, { lastRugCheck: checkNow });
+    else updatePosition(pos.tokenMint, { lastRugCheck: checkNow });
 
-        // Hard SL enforcement at 1s frequency (supplements checkPositions 15s cycle)
-        // Consecutive confirmation: require 2 consecutive hits to prevent false positives from quote flukes
-        const rtHardSlPct = pos.hardSlPct || autoConfig.hardSlPct || autoConfig.slPct || 25;
-        if (rugQuoteSol > 0 && curPnlPct <= -rtHardSlPct) {
-          const now = Date.now();
-          const prevHit = pos._hardSlFastHit || 0;
-          if (now - prevHit > 3000) {
-            // First hit — record timestamp, wait for confirmation on next tick
-            if (isDryMode) dryRun.updateDryPosition(pos.tokenMint, { _hardSlFastHit: now });
-            else updatePosition(pos.tokenMint, { _hardSlFastHit: now });
-            console.log(`[RUG-FAST] ⚠️ ${pos.symbol}: Hard SL candidate ${curPnlPct.toFixed(1)}% (≤-${rtHardSlPct}%) — confirming next tick...`);
-          } else {
-            // Confirmed hit (within 3s) — execute
-            if (acquireSellLock(pos.tokenMint)) {
-              console.log(`[RUG-FAST] ⛔ ${pos.symbol}: Hard SL CONFIRMED ${curPnlPct.toFixed(1)}% (≤-${rtHardSlPct}%) — 1s enforce`);
-              await executeFullExit(pos, `HARD SL (fast, ${curPnlPct.toFixed(1)}%)`, rugQuoteSol, { lockHeld: true });
-            }
-          }
-          continue;
-        } else if (rugQuoteSol > 0) {
-          // Price recovered above hard SL — clear confirmation flag
-          if (pos._hardSlFastHit) {
-            if (isDryMode) dryRun.updateDryPosition(pos.tokenMint, { _hardSlFastHit: 0 });
-            else updatePosition(pos.tokenMint, { _hardSlFastHit: 0 });
-            console.log(`[RUG-FAST] ✅ ${pos.symbol}: Hard SL candidate recovered (${curPnlPct.toFixed(1)}% > -${rtHardSlPct}%) — cleared`);
-          }
+    // STEP 4: Run rug signal detection (uses GMGN data + cached Jupiter quote)
+    const rugResult = await checkRugSignals(pos);
+
+    // Reuse cached quote from Jupiter (or 0 if Jupiter was skipped)
+    const rugQuoteSol = pos._lastRugQuoteSol || 0;
+    const rugCurrentPrice = pos.remainingTokens > 0 ? rugQuoteSol / pos.remainingTokens : (pos.entryPrice || 0);
+    const curPnlPct = pos.solSpent > 0 ? (((rugQuoteSol + (pos.totalSolReceived || 0)) - pos.solSpent) / pos.solSpent * 100) : 0;
+
+    // Hard SL enforcement at 1s frequency (supplements checkPositions 15s cycle)
+    // Consecutive confirmation: require 2 consecutive hits to prevent false positives from quote flukes
+    const rtHardSlPct = pos.hardSlPct || autoConfig.hardSlPct || autoConfig.slPct || 25;
+    if (rugQuoteSol > 0 && curPnlPct <= -rtHardSlPct) {
+      const now = Date.now();
+      const prevHit = pos._hardSlFastHit || 0;
+      if (now - prevHit > 3000) {
+        // First hit — record timestamp, wait for confirmation on next tick
+        if (isDryMode) dryRun.updateDryPosition(pos.tokenMint, { _hardSlFastHit: now });
+        else updatePosition(pos.tokenMint, { _hardSlFastHit: now });
+        console.log(`[RUG-FAST] ⚠️ ${pos.symbol}: Hard SL candidate ${curPnlPct.toFixed(1)}% (≤-${rtHardSlPct}%) — confirming next tick...`);
+      } else {
+        // Confirmed hit (within 3s) — execute
+        if (acquireSellLock(pos.tokenMint)) {
+          console.log(`[RUG-FAST] ⛔ ${pos.symbol}: Hard SL CONFIRMED ${curPnlPct.toFixed(1)}% (≤-${rtHardSlPct}%) — 1s enforce`);
+          await executeFullExit(pos, `HARD SL (fast, ${curPnlPct.toFixed(1)}%)`, rugQuoteSol, { lockHeld: true });
         }
+      }
+      return;
+    } else if (rugQuoteSol > 0) {
+      // Price recovered above hard SL — clear confirmation flag
+      if (pos._hardSlFastHit) {
+        if (isDryMode) dryRun.updateDryPosition(pos.tokenMint, { _hardSlFastHit: 0 });
+        else updatePosition(pos.tokenMint, { _hardSlFastHit: 0 });
+        console.log(`[RUG-FAST] ✅ ${pos.symbol}: Hard SL candidate recovered (${curPnlPct.toFixed(1)}% > -${rtHardSlPct}%) — cleared`);
+      }
+    }
 
         const rugLevel = rugResult.rugLevel || (rugResult.isRug ? 'exit' : 'safe');
 
@@ -1726,7 +1816,7 @@ function startMonitor() {
             else updatePosition(pos.tokenMint, clearData);
           }
           console.log(`[RUG-FAST] 👀 ${pos.symbol}: watch (score ${rugResult.rugScore}) — ${rugResult.signals.join(', ')}`);
-          continue;
+          return;
         }
         if (rugLevel === 'safe') {
           // FIX 4: Clear rug confirmation if level dropped
@@ -1735,7 +1825,7 @@ function startMonitor() {
             if (isDryMode) dryRun.updateDryPosition(pos.tokenMint, clearData);
             else updatePosition(pos.tokenMint, clearData);
           }
-          continue;
+          return;
         }
 
         if (rugLevel === 'warn') {
@@ -1775,7 +1865,7 @@ function startMonitor() {
             if (isDryMode) dryRun.updateDryPosition(pos.tokenMint, { _rugConfLevel: 'partial', _rugConfTs: Date.now(), _rugConfCount: 1 });
             else updatePosition(pos.tokenMint, { _rugConfLevel: 'partial', _rugConfTs: Date.now(), _rugConfCount: 1 });
             console.log(`[RUG-FAST] ${pos.symbol}: partial (score ${rugResult.rugScore}) — confirming next tick...`);
-            continue;
+            return;
           }
           // Second tick within 3s — CONFIRMED
           if (isDryMode) dryRun.updateDryPosition(pos.tokenMint, { _rugConfCount: 2 });
@@ -1785,7 +1875,7 @@ function startMonitor() {
           if (!pos._rugPartialSold) {
             if (!acquireSellLock(pos.tokenMint)) {
               console.log(`[RUG-FAST] ${pos.symbol}: sell lock held, skipping partial`);
-              continue;
+              return;
             }
             try {
               console.log(`[RUG-FAST] 🟡 ${pos.symbol}: partial exit triggered (score ${rugResult.rugScore}) — ${rugResult.signals.join(', ')}`);
@@ -1825,7 +1915,7 @@ function startMonitor() {
             if (isDryMode) dryRun.updateDryPosition(pos.tokenMint, { _rugConfLevel: 'exit', _rugConfTs: Date.now(), _rugConfCount: 1 });
             else updatePosition(pos.tokenMint, { _rugConfLevel: 'exit', _rugConfTs: Date.now(), _rugConfCount: 1 });
             console.log(`[RUG-FAST] ${pos.symbol}: exit (score ${rugResult.rugScore}) — confirming next tick...`);
-            continue;
+            return;
           }
           // Second tick within 3s — CONFIRMED
           if (isDryMode) dryRun.updateDryPosition(pos.tokenMint, { _rugConfCount: 2 });
@@ -1853,13 +1943,6 @@ function startMonitor() {
             console.log(`[RUG-FAST] ${pos.symbol}: sell lock held, will retry next cycle`);
           }
         }
-      }
-    } catch (e) {
-      console.error('[RUG-FAST] Loop error:', e.message);
-    } finally {
-      rugRunning = false;
-      setTimeout(rugTick, 1000);
-    }
   }
   setTimeout(rugTick, 2000); // start after 2s (offset from other loops)
 
