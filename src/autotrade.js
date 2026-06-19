@@ -1695,21 +1695,23 @@ function startMonitor() {
       }
     }
 
-    // STEP 2b: Absolute Top10 level — hard exit if Top10 > 24% AND token age > 5 minutes
+    // STEP 2b: Absolute Top10 level — hard exit if Top10 > threshold AND token age > minAge
     // Bypasses scoring system entirely (direct action, not probabilistic)
-    // New tokens have naturally high Top10 — only triggers after 5 min
-    if (gmgnData) {
+    // New tokens have naturally high Top10 — only triggers after minAge
+    if (gmgnData && autoConfig.top10ExitEnabled !== false) {
       const gDev = gmgnData.dev || {};
       const curTop10Abs = parseFloat(gDev.top_10_holder_rate || 0);
       const ageMs = pos.openedAt ? (Date.now() - new Date(pos.openedAt).getTime()) : 0;
-      if (ageMs > 300000 && curTop10Abs > 0.24) {
+      const top10Threshold = (autoConfig.top10ExitPct || 24) / 100;
+      const top10MinAgeMs = (autoConfig.top10ExitMinAgeSec || 300) * 1000;
+      if (ageMs > top10MinAgeMs && curTop10Abs > top10Threshold) {
         if (isDryMode) dryRun.updateDryPosition(pos.tokenMint, { lastRugCheck: checkNow });
         else updatePosition(pos.tokenMint, { lastRugCheck: checkNow });
-        console.log(`[RUG-FAST] 🚨 ${pos.symbol}: Top10 ${(curTop10Abs*100).toFixed(1)}% > 24% (age ${Math.round(ageMs/60000)}min) — hard exit`);
+        console.log(`[RUG-FAST] 🚨 ${pos.symbol}: Top10 ${(curTop10Abs*100).toFixed(1)}% > ${autoConfig.top10ExitPct || 24}% (age ${Math.round(ageMs/60000)}min) — hard exit`);
         const top10Msg = [
           `🚨 <b>TOP10 EXIT: ${pos.symbol}</b>`,
           ``,
-          `Top10 holders: <b>${(curTop10Abs*100).toFixed(1)}%</b> (> 24% threshold)`,
+          `Top10 holders: <b>${(curTop10Abs*100).toFixed(1)}%</b> (> ${autoConfig.top10ExitPct || 24}% threshold)`,
           `Age: ${Math.round(ageMs/60000)} min`,
           `PNL: ${pos.solSpent > 0 ? (((pos.totalSolReceived || 0) - pos.solSpent) / pos.solSpent * 100).toFixed(1) : '?'}%`,
           ``,

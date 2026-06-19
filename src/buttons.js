@@ -159,6 +159,11 @@ const MENU = {
      { text: `Exit: -${cfg.liqDrainExitPct || 50}%`, callback_data: 'cfg_input_liqDrainExitPct' }],
     [{ text: `⚠ Warn: -${cfg.liqDrainWarnPct || 30}%`, callback_data: 'cfg_input_liqDrainWarnPct' },
      { text: `⏱ ${cfg.liqDrainCheckSec || 10}s`, callback_data: 'cfg_input_liqDrainCheckSec' }],
+    // Top10 Absolute Exit
+    [{ text: '🎯 Top10 Exit', callback_data: 'noop' }],
+    [{ text: `${cfg.top10ExitEnabled !== false ? '✅ Top10 ON' : '❌ Top10 OFF'}`, callback_data: 'cfg_top10_toggle' },
+     { text: `Exit: >${cfg.top10ExitPct || 24}%`, callback_data: 'cfg_input_top10ExitPct' }],
+    [{ text: `⏱ Min Age: ${Math.round((cfg.top10ExitMinAgeSec || 300)/60)}min`, callback_data: 'cfg_input_top10ExitMinAgeSec' }],
     [{ text: '🔙 Back', callback_data: 'menu_main' }],
   ],
 
@@ -181,6 +186,8 @@ const MENU = {
     liqDrainWarnPct: { label: 'Liq Drain Warn %', hint: 'e.g. 30 (warning only)', min: 5, max: 80 },
     liqDrainCheckSec: { label: 'Liq Check Interval (sec)', hint: 'e.g. 10', min: 3, max: 60 },
     liqDrainMinLiq: { label: 'Min Entry Liq ($)', hint: 'e.g. 1000', min: 0, max: 100000 },
+    top10ExitPct: { label: 'Top10 Exit %', hint: 'e.g. 24 (full exit if above)', min: 10, max: 50 },
+    top10ExitMinAgeSec: { label: 'Top10 Min Age (sec)', hint: 'e.g. 300 (=5min)', min: 60, max: 3600 },
   },
 
   // Partial sell labels (dynamic by level)
@@ -595,6 +602,14 @@ async function handleCallbackQuery(cq) {
     const cfg = getAutoConfig();
     const current = cfg.liqDrainEnabled !== false;
     updateAutoConfig({ liqDrainEnabled: !current });
+    return sendConfigMenu(chatId);
+  }
+  // ── Top10 Exit handlers ──
+  if (data === 'cfg_top10_toggle') {
+    const { updateAutoConfig, getAutoConfig } = require('../src/autotrade');
+    const cfg = getAutoConfig();
+    const current = cfg.top10ExitEnabled !== false;
+    updateAutoConfig({ top10ExitEnabled: !current });
     return sendConfigMenu(chatId);
   }
 }
