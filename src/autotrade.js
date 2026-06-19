@@ -1695,6 +1695,34 @@ function startMonitor() {
       }
     }
 
+    // STEP 2b: Absolute Top10 level — hard exit if Top10 > 24% AND token age > 5 minutes
+    // Bypasses scoring system entirely (direct action, not probabilistic)
+    // New tokens have naturally high Top10 — only triggers after 5 min
+    if (gmgnData) {
+      const gDev = gmgnData.dev || {};
+      const curTop10Abs = parseFloat(gDev.top_10_holder_rate || 0);
+      const ageMs = pos.openedAt ? (Date.now() - new Date(pos.openedAt).getTime()) : 0;
+      if (ageMs > 300000 && curTop10Abs > 0.24) {
+        if (isDryMode) dryRun.updateDryPosition(pos.tokenMint, { lastRugCheck: checkNow });
+        else updatePosition(pos.tokenMint, { lastRugCheck: checkNow });
+        console.log(`[RUG-FAST] 🚨 ${pos.symbol}: Top10 ${(curTop10Abs*100).toFixed(1)}% > 24% (age ${Math.round(ageMs/60000)}min) — hard exit`);
+        const top10Msg = [
+          `🚨 <b>TOP10 EXIT: ${pos.symbol}</b>`,
+          ``,
+          `Top10 holders: <b>${(curTop10Abs*100).toFixed(1)}%</b> (> 24% threshold)`,
+          `Age: ${Math.round(ageMs/60000)} min`,
+          `PNL: ${pos.solSpent > 0 ? (((pos.totalSolReceived || 0) - pos.solSpent) / pos.solSpent * 100).toFixed(1) : '?'}%`,
+          ``,
+          `Top10 concentration too high — auto exit.`,
+        ].join('\n');
+        sendTelegram(top10Msg, { parse_mode: 'HTML' }).catch(() => {});
+        if (acquireSellLock(pos.tokenMint)) {
+          await executeFullExit(pos, `Top10 absolute ${(curTop10Abs*100).toFixed(1)}%`, 0, { lockHeld: true });
+        }
+        return;
+      }
+    }
+
     // STEP 3: Jupiter getQuote — CONDITIONAL (reduces calls from 5/sec to ~1/sec)
     // Strategy: call Jupiter every 3rd tick per position (staggered across positions)
     // OR when GMGN data shows suspicious signals (red flag triggered)
