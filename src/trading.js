@@ -30,16 +30,22 @@ async function getQuote(inputMint, outputMint, amount, slippageBps = 300) {
 
   // Retry on 429 (rate limit) with exponential backoff
   for (let attempt = 0; attempt < 3; attempt++) {
-    const res = await fetch(url, { headers: jupHeaders() });
-    if (res.ok) return res.json();
-    const err = await res.text();
-    if (res.status === 429 && attempt < 2) {
-      const wait = (attempt + 1) * 2000; // 2s, 4s
-      console.log(`[JUP] Rate limited, retrying in ${wait/1000}s...`);
-      await new Promise(r => setTimeout(r, wait));
-      continue;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15_000); // FIX 2: 15s timeout
+    try {
+      const res = await fetch(url, { headers: jupHeaders(), signal: controller.signal });
+      if (res.ok) return res.json();
+      const err = await res.text();
+      if (res.status === 429 && attempt < 2) {
+        const wait = (attempt + 1) * 2000; // 2s, 4s
+        console.log(`[JUP] Rate limited, retrying in ${wait/1000}s...`);
+        await new Promise(r => setTimeout(r, wait));
+        continue;
+      }
+      throw new Error(`Jupiter quote failed: ${err}`);
+    } finally {
+      clearTimeout(timer);
     }
-    throw new Error(`Jupiter quote failed: ${err}`);
   }
 }
 
@@ -55,20 +61,27 @@ async function getSwapTx(quote, userPublicKey, priorityFeeLamports = 50000) {
 
   // Retry on 429 with exponential backoff
   for (let attempt = 0; attempt < 3; attempt++) {
-    const res = await fetch(`${JUPITER_API}/swap`, {
-      method: 'POST',
-      headers: jupHeaders(),
-      body,
-    });
-    if (res.ok) return res.json();
-    const err = await res.text();
-    if (res.status === 429 && attempt < 2) {
-      const wait = (attempt + 1) * 2000;
-      console.log(`[JUP] Swap tx rate limited, retrying in ${wait/1000}s...`);
-      await new Promise(r => setTimeout(r, wait));
-      continue;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15_000); // FIX 2: 15s timeout
+    try {
+      const res = await fetch(`${JUPITER_API}/swap`, {
+        method: 'POST',
+        headers: jupHeaders(),
+        body,
+        signal: controller.signal,
+      });
+      if (res.ok) return res.json();
+      const err = await res.text();
+      if (res.status === 429 && attempt < 2) {
+        const wait = (attempt + 1) * 2000;
+        console.log(`[JUP] Swap tx rate limited, retrying in ${wait/1000}s...`);
+        await new Promise(r => setTimeout(r, wait));
+        continue;
+      }
+      throw new Error(`Jupiter swap tx failed: ${err}`);
+    } finally {
+      clearTimeout(timer);
     }
-    throw new Error(`Jupiter swap tx failed: ${err}`);
   }
 }
 
@@ -142,8 +155,13 @@ async function buyToken(tokenMint, solAmount, walletLabel = 'default', slippageB
   }
   console.log(`[TRADE] TX sent: ${sig}`);
 
-  // Confirm
-  const status = await conn.confirmTransaction(sig, 'confirmed');
+  // Confirm — FIX 3: 60s timeout to prevent hanging on dead WebSocket
+  const status = await Promise.race([
+    conn.confirmTransaction(sig, 'confirmed'),
+    new Promise((_, rej) =>
+      setTimeout(() => rej(new Error('confirmTransaction timeout (60s)')), 60_000)
+    )
+  ]);
   console.log(`[TRADE] Confirmed: ${sig}`);
 
   // Check if TX actually succeeded on-chain
@@ -207,8 +225,13 @@ async function sellToken(tokenMint, tokenAmount, decimals, walletLabel = 'defaul
   });
   console.log(`[TRADE] TX sent: ${sig}`);
 
-  // Confirm
-  const status = await conn.confirmTransaction(sig, 'confirmed');
+  // Confirm — FIX 3: 60s timeout to prevent hanging on dead WebSocket
+  const status = await Promise.race([
+    conn.confirmTransaction(sig, 'confirmed'),
+    new Promise((_, rej) =>
+      setTimeout(() => rej(new Error('confirmTransaction timeout (60s)')), 60_000)
+    )
+  ]);
   console.log(`[TRADE] Confirmed: ${sig}`);
 
   // Check if TX actually succeeded on-chain

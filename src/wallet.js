@@ -32,7 +32,10 @@ function getRpcUrl() {
 }
 
 function getConnection() {
-  return new Connection(getRpcUrl(), 'confirmed');
+  return new Connection(getRpcUrl(), {
+    commitment: 'confirmed',
+    confirmTransactionInitialTimeout: 60_000, // FIX 5: 60s timeout for confirmTransaction
+  });
 }
 
 // ─── Wallet Storage ────────────────────────────────────

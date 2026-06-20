@@ -29,3 +29,12 @@ config/telegram.json
 *.sqlite
 *.db
 data/
+
+# Test files
+test_*.js
+
+# Backups
+*.bak.*
+
+# Docs
+docs/

@@ -12,6 +12,63 @@ const dryRun = require('./dry-run');
 const fs = require('fs');
 const path = require('path');
 
+// ─── Shared API Cache ──────────────────────────────────────
+const gmgnCache = new Map(); // mint → { data, ts }
+const GMGN_CACHE_TTL = 2000; // 2s
+
+function getCachedGmgn(mint) {
+  const entry = gmgnCache.get(mint);
+  if (entry && Date.now() - entry.ts < GMGN_CACHE_TTL) return entry.data;
+  return null;
+}
+function setCachedGmgn(mint, data) {
+  gmgnCache.set(mint, { data, ts: Date.now() });
+}
+async function gmgnFetchCached(chain, address, timeoutMs = 5000) {
+  const cached = getCachedGmgn(address);
+  if (cached) return cached;
+  const data = await gmgnFetch(chain, address, timeoutMs);
+  setCachedGmgn(address, data);
+  return data;
+}
+
+// Jupiter quote cache
+const jupiterCache = new Map(); // key(mint+amount) → { quote, ts }
+const JUPITER_CACHE_TTL = 3000; // 3s
+function getCachedJupiter(mint, amount) {
+  const key = `${mint}_${amount}`;
+  const entry = jupiterCache.get(key);
+  if (entry && Date.now() - entry.ts < JUPITER_CACHE_TTL) return entry.quote;
+  return null;
+}
+function setCachedJupiter(mint, amount, quote) {
+  const key = `${mint}_${amount}`;
+  jupiterCache.set(key, { quote, ts: Date.now() });
+}
+
+// Global Jupiter rate limiter
+let jupiterCallsThisTick = 0;
+const MAX_JUPITER_PER_TICK = 4;
+
+// SOL price cache (for GMGN USD→SOL conversion)
+async function getSolPriceUsd() {
+  if (!global._solPriceUsd || Date.now() - (global._solPriceTs || 0) > 60000) {
+    try {
+      const resp = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd');
+      const d = await resp.json();
+      global._solPriceUsd = d.solana.usd;
+      global._solPriceTs = Date.now();
+    } catch (_) {}
+  }
+  return global._solPriceUsd || 0;
+}
+
+// Position field update helper
+function updatePosField(pos, isDryMode, data) {
+  if (isDryMode) dryRun.updateDryPosition(pos.tokenMint, data);
+  else updatePosition(pos.tokenMint, data);
+}
+
 const DEFAULT_CONFIG = {
   enabled: false,
   mode: 'live',  // 'live' or 'dry_run'
@@ -446,6 +503,13 @@ async function autoBuy(tokenData) {
 async function executePartialSell(pos, partial, currentPrice) {
   const isDry = pos.isDryRun === true;
 
+  // Acquire sell lock to prevent concurrent sells (dual partial sell bug fix)
+  const lockFromCaller = partial._lockHeld === true;
+  if (!isDry && !lockFromCaller && !acquireSellLock(pos.tokenMint)) {
+    console.log(`[AUTO] ${pos.symbol}: sell lock held, skipping partial sell`);
+    return { success: false, reason: 'sell_lock_held' };
+  }
+
   // Reload position from disk to get latest remainingTokens
   const positions = require('./positions');
   const freshPos = isDry
@@ -536,6 +600,9 @@ async function executePartialSell(pos, partial, currentPrice) {
     if (e.message?.includes("NO_ROUTES") || e.message?.includes("No routes")) {
       console.log(`[AUTO] ${freshPos.symbol}: partial sell NO_ROUTES, marking as failed`);
     }
+  } finally {
+    // Release sell lock if we acquired it (not from caller)
+    if (!isDry && !lockFromCaller) releaseSellLock(pos.tokenMint);
   }
 }
 
@@ -721,7 +788,7 @@ function gmgnFetch(chain, address, timeoutMs = 5000) {
 // ─── Rug Signal Detector ─────────────────────────────
 // Compares current GMGN data with entry snapshot
 // Returns { isRug: bool, signals: string[] }
-async function checkRugSignals(pos) {
+async function checkRugSignals(pos, cachedGmgnData, cachedLastQuoteSol) {
   const snap = pos.gmgnSnapshot;
   if (!snap) return { isRug: false, signals: [] };
 
@@ -740,7 +807,7 @@ async function checkRugSignals(pos) {
   try {
     const rawAmount = Math.floor(pos.remainingTokens * Math.pow(10, pos.decimals || 6));
     if (rawAmount > 0 && pos.remainingTokens > 0) {
-      let quoteSolOut = pos._lastRugQuoteSol; // reuse rugTick pre-check result if already cached
+      let quoteSolOut = pos._lastRugQuoteSol || cachedLastQuoteSol || 0; // reuse cached
       if (!quoteSolOut) {
         const priceQuote = await getQuote(pos.tokenMint, SOL_MINT, rawAmount, 500);
         quoteSolOut = parseFloat(priceQuote.outAmount) / 1e9;
@@ -762,8 +829,8 @@ async function checkRugSignals(pos) {
   }
 
   try {
-    // Direct API call (200ms avg vs 500ms gmgn-cli)
-    const t = await gmgnFetch('sol', pos.tokenMint);
+    // Use cached GMGN data if available, else fetch
+    const t = cachedGmgnData || await gmgnFetch('sol', pos.tokenMint);
     const dev = t.dev || {};
     const stat = t.stat || {};
     const pool = t.pool || {};
@@ -931,7 +998,15 @@ async function checkRugSignals(pos) {
 
     // Graduated response: watch(10-29) → warn(30-49) → partial(50-74) → exit(75+)
     const rugLevel = rugScore >= 75 ? 'exit' : rugScore >= 50 ? 'partial' : rugScore >= 30 ? 'warn' : rugScore > 0 ? 'watch' : 'safe';
-    return { isRug: rugScore >= 30, signals, rugScore, rugLevel };
+
+    // EMA smoothing for rug score (prevents oscillation causing missed confirmations)
+    const alpha = 0.6;
+    if (!pos._emaRugScore) pos._emaRugScore = rugScore;
+    else pos._emaRugScore = pos._emaRugScore * (1 - alpha) + rugScore * alpha;
+    const smoothedScore = Math.round(pos._emaRugScore);
+    const smoothedLevel = smoothedScore >= 75 ? 'exit' : smoothedScore >= 50 ? 'partial' : smoothedScore >= 30 ? 'warn' : smoothedScore > 0 ? 'watch' : 'safe';
+
+    return { isRug: smoothedScore >= 30, signals, rugScore: smoothedScore, rawRugScore: rugScore, rugLevel: smoothedLevel };
 
   } catch (e) {
     // API error — retry 2x before giving up (faster retries with direct API)
@@ -1425,6 +1500,491 @@ async function checkBundlers() {
   }
 }
 
+// ─── Unified Safety Loop (2s) ────────────────────────────────
+// Replaces: tick (15s) + softSlTick (3s) + rugTick (2s)
+// Single loop with shared cache, priority queue, and all checks
+let unifiedRunning = false;
+let unifiedRunningSince = 0;
+let _unifiedTickNum = 0;
+
+async function unifiedTick() {
+  // Watchdog: force-reset if stuck > 2 minutes
+  if (unifiedRunning) {
+    if (Date.now() - unifiedRunningSince > 120_000) {
+      console.error('[UNIFIED] WATCHDOG: stuck for 2min, force-resetting');
+      unifiedRunning = false;
+    } else {
+      return;
+    }
+  }
+  unifiedRunning = true;
+  unifiedRunningSince = Date.now();
+  jupiterCallsThisTick = 0;
+
+  try {
+    const isDryMode = autoConfig.mode === 'dry_run';
+    let allPos = isDryMode ? dryRun.getOpenDryPositions() : getOpenPositions();
+    if (!allPos.length) return;
+
+    // PRIORITY QUEUE: sort by urgency
+    allPos = [...allPos].sort((a, b) => {
+      const scoreA = (a.softSlTriggeredAt ? 1000 : 0)
+        + (a._rugConfLevel ? 500 : 0)
+        + ((a._emaRugScore || a._lastRugScore || 0) > 40 ? 200 : 0)
+        + (a._emaRugScore || a._lastRugScore || 0);
+      const scoreB = (b.softSlTriggeredAt ? 1000 : 0)
+        + (b._rugConfLevel ? 500 : 0)
+        + ((b._emaRugScore || b._lastRugScore || 0) > 40 ? 200 : 0)
+        + (b._emaRugScore || b._lastRugScore || 0);
+      return scoreB - scoreA;
+    });
+
+    for (let i = 0; i < allPos.length; i++) {
+      _unifiedTickNum++;
+      const pos = allPos[i];
+      try {
+        await Promise.race([
+          processUnifiedPosition(pos, isDryMode),
+          new Promise((_, rej) =>
+            setTimeout(() => rej(new Error('processUnifiedPosition timeout (30s)')), 30_000)
+          )
+        ]);
+      } catch (tickErr) {
+        console.error(`[UNIFIED] ${pos.symbol}: tick error — ${tickErr.message}`);
+        try { releaseSellLock(pos.tokenMint); } catch (_) {}
+      }
+      // Stagger: 500ms between positions
+      if (i < allPos.length - 1) {
+        await new Promise(r => setTimeout(r, 500));
+      }
+    }
+  } catch (e) {
+    console.error('[UNIFIED] Loop error:', e.message);
+  } finally {
+    unifiedRunning = false;
+    unifiedRunningSince = 0;
+    setTimeout(unifiedTick, 2000);
+  }
+}
+
+// ─── Process Single Position (unified) ───────────────────────
+async function processUnifiedPosition(pos, isDryMode) {
+  const checkNow = Date.now();
+
+  // ─── Wallet balance check (every 5th tick, live only, ~10s) ───
+  if (!isDryMode && _unifiedTickNum % 5 === 0) {
+    try {
+      const walletBal = await getTokenBalance(pos.tokenMint);
+      if (walletBal.amount <= 0) {
+        const pnl = (pos.totalSolReceived || 0) - (pos.solSpent || 0);
+        closePosition(pos.tokenMint, 0, 'none', 'wallet_empty');
+        setPostCloseLock(pos.tokenMint);
+        console.log(`[UNIFIED] ${pos.symbol}: wallet empty, auto-closed (PNL: ${pnl.toFixed(4)} SOL)`);
+        sendTelegram(
+          `🧹 <b>Auto-Closed: ${pos.symbol}</b>\n\n` +
+          `📊 Wallet balance = 0\n` +
+          `💰 PNL: ${pnl >= 0 ? '+' : ''}${pnl.toFixed(4)} SOL`,
+          { parse_mode: 'HTML' }
+        ).catch(() => {});
+        return;
+      }
+    } catch (_) {}
+  }
+
+  // ─── STEP 1: GMGN fetch (shared cache, 2s TTL) ───
+  let gmgnData = null;
+  try {
+    gmgnData = await gmgnFetchCached('sol', pos.tokenMint);
+  } catch (gmgnErr) {
+    console.log(`[UNIFIED] ${pos.symbol}: GMGN fetch failed (${gmgnErr.message?.slice(0, 50)})`);
+  }
+
+  // ─── STEP 1a: Dead token (0 holders + $0 liq) ───
+  if (gmgnData) {
+    const gPool = gmgnData.pool || {};
+    const gHolders = gmgnData.holder_count || 0;
+    const gLiq = parseFloat(gPool.liquidity || 0);
+    if (gHolders === 0 && gLiq === 0) {
+      updatePosField(pos, isDryMode, { lastRugCheck: checkNow });
+      console.log(`[UNIFIED] ${pos.symbol}: GMGN dead (0 holders, $0 liq)`);
+      if (acquireSellLock(pos.tokenMint)) {
+        await executeFullExit(pos, 'rug_gmgn_dead', 0, { lockHeld: true });
+      }
+      return;
+    }
+  }
+
+  // ─── STEP 1b: Top10 absolute exit ───
+  if (gmgnData && autoConfig.top10ExitEnabled !== false) {
+    const gDev = gmgnData.dev || {};
+    const curTop10Abs = parseFloat(gDev.top_10_holder_rate || 0);
+    const ageMs = pos.openedAt ? (Date.now() - new Date(pos.openedAt).getTime()) : 0;
+    const top10Threshold = (autoConfig.top10ExitPct || 24) / 100;
+    const top10MinAgeMs = (autoConfig.top10ExitMinAgeSec || 300) * 1000;
+    if (ageMs > top10MinAgeMs && curTop10Abs > top10Threshold) {
+      updatePosField(pos, isDryMode, { lastRugCheck: checkNow });
+      console.log(`[UNIFIED] ${pos.symbol}: Top10 ${(curTop10Abs*100).toFixed(1)}% > ${autoConfig.top10ExitPct || 24}% (age ${Math.round(ageMs/60000)}min)`);
+      const top10Msg = [
+        `🚨 <b>TOP10 EXIT: ${pos.symbol}</b>`, ``,
+        `Top10 holders: <b>${(curTop10Abs*100).toFixed(1)}%</b>`,
+        `Age: ${Math.round(ageMs/60000)} min`,
+        `PNL: ${pos.solSpent > 0 ? (((pos.totalSolReceived || 0) - pos.solSpent) / pos.solSpent * 100).toFixed(1) : '?'}%`,
+      ].join('\n');
+      sendTelegram(top10Msg, { parse_mode: 'HTML' }).catch(() => {});
+      if (acquireSellLock(pos.tokenMint)) {
+        await executeFullExit(pos, `Top10 absolute ${(curTop10Abs*100).toFixed(1)}%`, 0, { lockHeld: true });
+      }
+      return;
+    }
+  }
+
+  // ─── STEP 1c: Liquidity drain (throttled 10s per pos) ───
+  if (autoConfig.liqDrainEnabled !== false && gmgnData) {
+    const lastLiqCheck = pos._lastLiqCheck || 0;
+    const liqCheckInterval = (autoConfig.liqDrainCheckSec || 10) * 1000;
+    if (checkNow - lastLiqCheck >= liqCheckInterval) {
+      const gPool = gmgnData.pool || {};
+      const rawLiq = gPool.liquidity;
+      const curLiq = parseFloat(rawLiq);
+      const entryLiq = pos.gmgnSnapshot?.liquidity || 0;
+      const liqMinLiq = autoConfig.liqDrainMinLiq || 1000;
+
+      if (entryLiq >= liqMinLiq && Number.isFinite(curLiq)) {
+        updatePosField(pos, isDryMode, { _lastLiqCheck: checkNow });
+
+        if (curLiq === 0 && entryLiq > 0) {
+          console.log(`[UNIFIED] ${pos.symbol}: liq dropped to $0 — instant exit`);
+          if (acquireSellLock(pos.tokenMint)) {
+            try {
+              const closeResult = await sellAll(pos.tokenMint, autoConfig.walletLabel, 500);
+              if (closeResult?.success) {
+                const closed = closePosition(pos.tokenMint, closeResult.outputSol, closeResult.signature, 'liq_drain_100%');
+                setPostCloseLock(pos.tokenMint);
+                releaseSellLock(pos.tokenMint);
+                const emoji = (closed.pnl || 0) >= 0 ? '🟢' : '🔴';
+                sendTelegram(`${emoji} <b>Liq Drain 100%: ${pos.symbol}</b>\n\nGot: ${(closeResult.outputSol || 0).toFixed(4)} SOL\nPNL: ${(closed.pnl || 0) >= 0 ? '+' : ''}${(closed.pnl || 0).toFixed(4)} SOL`, { parse_mode: 'HTML' }).catch(() => {});
+              } else {
+                closePosition(pos.tokenMint, 0, '', 'liq_drain_no_routes');
+                setPostCloseLock(pos.tokenMint);
+                releaseSellLock(pos.tokenMint);
+              }
+            } catch (sellErr) {
+              releaseSellLock(pos.tokenMint);
+              console.error(`[UNIFIED] ${pos.symbol}: liq drain sell failed: ${sellErr.message}`);
+            }
+          }
+          return;
+        }
+
+        if (curLiq > 0 && entryLiq > 0) {
+          const liqDrop = ((entryLiq - curLiq) / entryLiq) * 100;
+          const liqWarnPct = autoConfig.liqDrainWarnPct || 30;
+          const liqExitPct = pos.gmgnSnapshot?.entryRiskScore >= 60
+            ? Math.min(autoConfig.liqDrainExitPct || 50, 20)
+            : (autoConfig.liqDrainExitPct || 50);
+
+          if (liqDrop >= liqExitPct) {
+            console.log(`[UNIFIED] ${pos.symbol}: liq drain ${liqDrop.toFixed(0)}% ($${Math.round(entryLiq)} -> $${Math.round(curLiq)}) — exit`);
+            if (acquireSellLock(pos.tokenMint)) {
+              await executeFullExit(pos, `Liq Drain (-${liqDrop.toFixed(0)}%)`, 0, { lockHeld: true });
+            }
+            return;
+          } else if (liqDrop >= liqWarnPct && !pos._liqWarnSent) {
+            updatePosField(pos, isDryMode, { _liqWarnSent: true });
+            sendTelegram(`⚠️ <b>Liq Warning: ${pos.symbol}</b>\n\nLiq: $${Math.round(entryLiq)} -> $${Math.round(curLiq)} (-${liqDrop.toFixed(0)}%)`, { parse_mode: 'HTML' }).catch(() => {});
+          }
+        }
+      }
+    }
+  }
+
+  // ─── STEP 2: Rug signals (use cached GMGN, no refetch) ───
+  const cachedLastQuoteSol = pos._lastRugQuoteSol || 0;
+  const rugResult = await checkRugSignals(pos, gmgnData, cachedLastQuoteSol);
+  updatePosField(pos, isDryMode, { _lastRugScore: rugResult.rawRugScore || rugResult.rugScore || 0, _emaRugScore: pos._emaRugScore });
+
+  // ─── STEP 3: Jupiter quote (conditional + global cap) ───
+  let quoteSolOut = 0;
+  let needJupiter = false;
+
+  const softSlPct = autoConfig.softSlPct || 20;
+  const hardSlPct = autoConfig.hardSlPct || autoConfig.slPct || 25;
+  const estimatedPnl = pos.solSpent > 0 ? (((pos._lastRugQuoteSol || 0) + (pos.totalSolReceived || 0)) - pos.solSpent) / pos.solSpent * 100 : 0;
+
+  // SL-critical positions: always fetch
+  if (pos.softSlTriggeredAt) needJupiter = true;
+  else if (estimatedPnl < -(hardSlPct - 5)) needJupiter = true;
+  else if (gmgnData) {
+    const gPool = gmgnData.pool || {};
+    const gStat = gmgnData.stat || {};
+    const gHolders = gmgnData.holder_count || 0;
+    const gLiq = parseFloat(gPool.liquidity || 0);
+    const gSellVol5m = parseFloat(gStat.sell_volume_5m || 0);
+    const gBuyVol5m = parseFloat(gStat.buy_volume_5m || 0);
+    const snap = pos.gmgnSnapshot;
+    if (snap && snap.holders > 10 && gHolders > 0 && ((snap.holders - gHolders) / snap.holders) > 0.10) needJupiter = true;
+    if (snap && snap.liquidity > 1000 && gLiq > 0 && ((snap.liquidity - gLiq) / snap.liquidity) > 0.15) needJupiter = true;
+    if (gSellVol5m > 0 && gBuyVol5m > 0 && gSellVol5m / gBuyVol5m > 3) needJupiter = true;
+    if (gSellVol5m > 0 && gBuyVol5m === 0) needJupiter = true;
+  }
+  // Normal: every 3rd tick
+  if (!needJupiter && _unifiedTickNum % 3 === 0) needJupiter = true;
+
+  // Global cap (SL-critical positions exempt)
+  const isSlCritical = pos.softSlTriggeredAt || estimatedPnl < -(hardSlPct - 5);
+  if (needJupiter && jupiterCallsThisTick >= MAX_JUPITER_PER_TICK && !isSlCritical) {
+    needJupiter = false;
+    console.log(`[UNIFIED] ${pos.symbol}: Jupiter cap (${MAX_JUPITER_PER_TICK}/tick), using cached`);
+  }
+
+  if (needJupiter) {
+    try {
+      const rawAmount = Math.floor(pos.remainingTokens * Math.pow(10, pos.decimals || 6));
+      if (rawAmount > 0 && pos.remainingTokens > 0) {
+        const quote = await getQuote(pos.tokenMint, SOL_MINT, rawAmount, 500);
+        quoteSolOut = parseFloat(quote.outAmount) / 1e9;
+        jupiterCallsThisTick++;
+        pos._lastRugQuoteSol = quoteSolOut;
+        setCachedJupiter(pos.tokenMint, rawAmount, quote);
+        const _impactUpdate = {
+          _prevPriceImpact: pos._lastPriceImpact || 0,
+          _prevPriceImpactTs: Date.now(),
+          _lastPriceImpact: parseFloat(quote.priceImpactPct || 0),
+          _lastQuoteSol: quoteSolOut,
+        };
+        updatePosField(pos, isDryMode, _impactUpdate);
+        if (pos.quoteFailCount > 0) updatePosField(pos, isDryMode, { quoteFailCount: 0 });
+      }
+    } catch (e) {
+      const msg = e.message || '';
+      if (msg.includes('429') || msg.includes('Too many requests')) {
+        console.log(`[UNIFIED] ${pos.symbol}: Jupiter 429, using cached`);
+        quoteSolOut = pos._lastRugQuoteSol || 0;
+      } else if (msg.includes('NO_ROUTES_FOUND') || msg.includes('No routes found')) {
+        const failCount = (pos.quoteFailCount || 0) + 1;
+        if (failCount >= 3) {
+          updatePosField(pos, isDryMode, { lastRugCheck: checkNow });
+          console.log(`[UNIFIED] ${pos.symbol}: NO_ROUTES x3, auto-closing`);
+          if (acquireSellLock(pos.tokenMint)) {
+            await executeFullExit(pos, 'dead_token', 0, { lockHeld: true });
+          }
+          return;
+        }
+        updatePosField(pos, isDryMode, { quoteFailCount: failCount });
+        console.log(`[UNIFIED] ${pos.symbol}: NO_ROUTES (${failCount}/3)`);
+        // GMGN price fallback
+        try {
+          const gmgnPrice = await gmgnTokenInfo(pos.tokenMint);
+          const gmgnPriceUSD = parseFloat(gmgnPrice?.price?.price || 0);
+          if (gmgnPriceUSD > 0) {
+            const solPrice = await getSolPriceUsd();
+            if (solPrice > 0) {
+              quoteSolOut = (gmgnPriceUSD / solPrice) * pos.remainingTokens;
+              console.log(`[UNIFIED] ${pos.symbol}: GMGN fallback $${gmgnPriceUSD} -> ${quoteSolOut.toFixed(4)} SOL`);
+            }
+          }
+        } catch (_) {}
+      } else {
+        console.log(`[UNIFIED] ${pos.symbol}: Jupiter error: ${msg.slice(0, 50)}`);
+        quoteSolOut = pos._lastRugQuoteSol || 0;
+      }
+    }
+  } else {
+    quoteSolOut = pos._lastRugQuoteSol || 0;
+  }
+
+  if (!quoteSolOut) return;
+
+  // ─── STEP 4: PNL calculation ───
+  const currentValueSol = quoteSolOut;
+  const totalValueSol = currentValueSol + (pos.totalSolReceived || 0);
+  const pnlSol = totalValueSol - pos.solSpent;
+  const pnlPct = pos.solSpent > 0 ? (pnlSol / pos.solSpent * 100) : 0;
+  const currentPrice = pos.remainingTokens > 0 ? currentValueSol / pos.remainingTokens : 0;
+
+  updatePosField(pos, isDryMode, { lastRugCheck: checkNow });
+
+  // Rug warning at -90%
+  if (pnlPct <= -90 && !pos.rugWarningSent) {
+    updatePosField(pos, isDryMode, { rugWarningSent: true });
+    sendTelegram(`🚨 <b>RUG WARNING: ${pos.symbol}</b>\n\nPNL: <b>${pnlPct.toFixed(1)}%</b>\nMassive dump detected!`, { parse_mode: 'HTML' }).catch(() => {});
+  }
+
+  // Peak update
+  if (currentPrice > (pos.peakPrice || 0)) {
+    const effectivePnlPct = pos._partialSellReset
+      ? ((currentPrice / pos.entryPrice) - 1) * 100
+      : pnlPct;
+    updatePosField(pos, isDryMode, { peakPrice: currentPrice, peakPnlPct: parseFloat(effectivePnlPct.toFixed(1)) });
+  }
+
+  // ─── STEP 5: Collect actions (PRIORITY ORDER) ───
+  const actions = [];
+
+  // P1: Hard SL (instant, no consecutive confirm)
+  if (pnlPct <= -hardSlPct) {
+    actions.push({ type: 'hard_sl', pnlPct, priority: 0 });
+  }
+
+  // P2: Rug signals (from Step 2)
+  const rugLevel = rugResult.rugLevel || 'safe';
+  const rugScore = rugResult.rugScore || 0;
+
+  if (rugLevel === 'exit' && rugScore >= 75) {
+    // Consecutive confirmation for rug exit (12s window)
+    const rugConfLevel = pos._rugConfLevel || '';
+    const rugConfTs = pos._rugConfTs || 0;
+    const rugConfCount = pos._rugConfCount || 0;
+    const confAge = Date.now() - rugConfTs;
+    if (rugConfLevel !== 'exit' || confAge > 12000) {
+      updatePosField(pos, isDryMode, { _rugConfLevel: 'exit', _rugConfTs: Date.now(), _rugConfCount: 1 });
+      console.log(`[UNIFIED] ${pos.symbol}: rug exit (score ${rugScore}) — confirming...`);
+    } else {
+      updatePosField(pos, isDryMode, { _rugConfCount: 2 });
+      actions.push({ type: 'rug_exit', rugResult, priority: 1 });
+    }
+  } else if (rugLevel === 'partial' && rugScore >= 50 && !pos._rugPartialSold) {
+    // Consecutive confirmation with 12s window
+    const rugConfLevel = pos._rugConfLevel || '';
+    const rugConfTs = pos._rugConfTs || 0;
+    const rugConfCount = pos._rugConfCount || 0;
+    const confAge = Date.now() - rugConfTs;
+    if (rugConfLevel !== 'partial' || confAge > 12000) {
+      updatePosField(pos, isDryMode, { _rugConfLevel: 'partial', _rugConfTs: Date.now(), _rugConfCount: 1 });
+      console.log(`[UNIFIED] ${pos.symbol}: rug partial (score ${rugScore}) — confirming...`);
+    } else {
+      // 2nd tick within 5s — CONFIRMED
+      updatePosField(pos, isDryMode, { _rugConfCount: 2 });
+      actions.push({ type: 'rug_partial', rugResult, priority: 2 });
+    }
+  }
+
+  // Clear rug confirmation if level dropped
+  if (rugLevel === 'safe' || rugLevel === 'watch') {
+    if (pos._rugConfLevel) {
+      updatePosField(pos, isDryMode, { _rugConfLevel: '', _rugConfTs: 0, _rugConfCount: 0 });
+    }
+  }
+
+  // Rug warn alert
+  if (rugLevel === 'warn' && (pos._rugWarnLevel || 'safe') === 'safe') {
+    updatePosField(pos, isDryMode, { _rugWarnLevel: 'warn' });
+    const warnMsg = [
+      `⚠️ <b>RUG EARLY WARNING: ${pos.symbol}</b>`, ``,
+      `PNL: ${pnlPct.toFixed(1)}%  Score: ${rugScore}`, ``,
+      `⚠️ Signals:`, ...rugResult.signals.map(s => `• ${s}`),
+      ``, `Watching — will sell if signals escalate.`,
+    ].join('\n');
+    sendTelegram(warnMsg, { parse_mode: 'HTML' }).catch(() => {});
+  } else if (rugLevel !== 'warn' && pos._rugWarnLevel === 'warn') {
+    updatePosField(pos, isDryMode, { _rugWarnLevel: 'safe' });
+  }
+
+  // P3: Trailing TP
+  if (pos.trailingEnabled && pos.peakPrice) {
+    const dropFromPeak = ((pos.peakPrice - currentPrice) / pos.peakPrice * 100);
+    const peakPnl = pos.peakPnlPct || 0;
+    const triggerPct = autoConfig.trailingTriggerPct || pos.trailingTriggerPct || 20;
+    if (peakPnl > triggerPct && dropFromPeak >= (pos.trailingDropPct || 15)) {
+      actions.push({ type: 'trailing', dropFromPeak: dropFromPeak.toFixed(1), peakPnl, priority: 3 });
+    }
+  }
+
+  // P4: Partial sell (PNL levels)
+  const pendingPartials = (pos.partialSells || []).filter(s => !s.sold && s.enabled !== false);
+  for (const partial of pendingPartials) {
+    if (pnlPct >= partial.atPct) {
+      actions.push({ type: 'partial', atPct: partial.atPct, sellPct: partial.sellPct, priority: 4 });
+    }
+  }
+
+  // P5: Soft SL
+  if (pnlPct <= -softSlPct && pnlPct > -hardSlPct) {
+    const softSlWaitSec = autoConfig.softSlWaitSec || 30;
+    if (!pos.softSlTriggeredAt) {
+      updatePosField(pos, isDryMode, { softSlTriggeredAt: Date.now() });
+      console.log(`[UNIFIED] ${pos.symbol}: Soft SL triggered (${pnlPct.toFixed(1)}%), waiting ${softSlWaitSec}s...`);
+      sendTelegram(`⚠️ <b>Soft SL: ${pos.symbol}</b>\n\nPNL: ${pnlPct.toFixed(1)}%\nWaiting ${softSlWaitSec}s...`, { parse_mode: 'HTML' }).catch(() => {});
+    } else {
+      const elapsed = (Date.now() - pos.softSlTriggeredAt) / 1000;
+      if (elapsed >= softSlWaitSec) {
+        actions.push({ type: 'soft_sl', waited: Math.round(elapsed), pnlPct, priority: 5 });
+      }
+    }
+  } else if (pnlPct > -softSlPct) {
+    if (pos.softSlTriggeredAt) {
+      updatePosField(pos, isDryMode, { softSlTriggeredAt: null, rugWarningSent: false });
+      console.log(`[UNIFIED] ${pos.symbol}: Soft SL recovered! (${pnlPct.toFixed(1)}%)`);
+      sendTelegram(`✅ <b>Soft SL Recovered: ${pos.symbol}</b>\n\nPNL: ${pnlPct.toFixed(1)}%`, { parse_mode: 'HTML' }).catch(() => {});
+    }
+  }
+
+  // Sort by priority (lowest = most urgent)
+  actions.sort((a, b) => a.priority - b.priority);
+
+  if (actions.length > 0) {
+    console.log(`[UNIFIED] ${pos.symbol}: PNL ${pnlPct.toFixed(1)}%, rug ${rugScore}, actions: [${actions.map(a=>a.type)}]`);
+  }
+
+  // ─── STEP 6: Execute actions ───
+  for (const action of actions) {
+    // Verify position still exists
+    const currentPos = isDryMode
+      ? dryRun.getOpenDryPositions().find(p => p.tokenMint === pos.tokenMint)
+      : getPosition(pos.tokenMint);
+    if (!currentPos) break;
+
+    if (action.type === 'hard_sl') {
+      if (!acquireSellLock(pos.tokenMint)) break;
+      console.log(`[UNIFIED] ${pos.symbol}: HARD SL (${pnlPct.toFixed(1)}%)`);
+      await executeFullExit(pos, `HARD SL (${pnlPct.toFixed(1)}%)`, quoteSolOut, { lockHeld: true });
+      break;
+    } else if (action.type === 'rug_exit') {
+      if (!acquireSellLock(pos.tokenMint)) break;
+      console.log(`[UNIFIED] ${pos.symbol}: RUG EXIT (score ${rugScore})`);
+      const rugAlertMsg = [
+        `🚨 <b>RUG SIGNAL DETECTED</b>`, ``,
+        `Token: <b>${pos.symbol || 'Unknown'}</b>`,
+        `CA: <code>${pos.tokenMint}</code>`,
+        `PNL: ${pnlPct.toFixed(1)}%`, ``,
+        `⚠️ Signals:`, ...rugResult.signals.map(s => `• ${s}`),
+        ``, `Selling immediately...`,
+      ].join('\n');
+      sendTelegram(rugAlertMsg, { parse_mode: 'HTML' }).catch(() => {});
+      await executeFullExit(pos, `rug_signal: ${rugResult.signals.join(', ')}`, quoteSolOut, { lockHeld: true });
+      break;
+    } else if (action.type === 'rug_partial') {
+      if (!acquireSellLock(pos.tokenMint)) break;
+      console.log(`[UNIFIED] ${pos.symbol}: RUG PARTIAL (score ${rugScore})`);
+      const partialMsg = [
+        `🟡 <b>RUG PARTIAL EXIT: ${pos.symbol}</b>`, ``,
+        `PNL: ${pnlPct.toFixed(1)}%  Score: ${rugScore}`, ``,
+        `⚠️ Signals:`, ...rugResult.signals.map(s => `• ${s}`),
+        ``, `Selling 50% now...`,
+      ].join('\n');
+      sendTelegram(partialMsg, { parse_mode: 'HTML' }).catch(() => {});
+      const freshPos = isDryMode ? dryRun.getOpenDryPositions().find(p => p.tokenMint === pos.tokenMint) : getPosition(pos.tokenMint);
+      await executePartialSell(freshPos || pos, { sellPct: 50, atPct: -1, _lockHeld: true }, currentPrice);
+      updatePosField(pos, isDryMode, { _rugPartialSold: true, _rugWarnLevel: 'partial' });
+      releaseSellLock(pos.tokenMint);
+    } else if (action.type === 'trailing') {
+      if (!acquireSellLock(pos.tokenMint)) break;
+      await executeFullExit(pos, `trailing (peak +${action.peakPnl}%, dropped ${action.dropFromPeak}%)`, quoteSolOut, { lockHeld: true });
+      break;
+    } else if (action.type === 'partial') {
+      // executePartialSell handles its own sell lock
+      await executePartialSell(pos, action, currentPrice);
+      const freshPos = isDryMode ? dryRun.getOpenDryPositions().find(p => p.tokenMint === pos.tokenMint) : getPosition(pos.tokenMint);
+      if (freshPos) Object.assign(pos, freshPos);
+    } else if (action.type === 'soft_sl') {
+      if (!acquireSellLock(pos.tokenMint)) break;
+      console.log(`[UNIFIED] ${pos.symbol}: Soft SL expired (${action.waited}s)`);
+      await executeFullExit(pos, `Soft SL (waited ${action.waited}s)`, quoteSolOut, { lockHeld: true });
+      break;
+    }
+  }
+}
+
 // ─── Start Position Monitor ────────────────────────────
 function startMonitor() {
   if (monitoring) return;
@@ -1432,549 +1992,10 @@ function startMonitor() {
   loadAutoConfig();
 
   const modeTag = autoConfig.mode === 'dry_run' ? ' [DRY RUN]' : ' [LIVE]';
-  console.log(`[AUTO] Monitor started${modeTag} (check every ${autoConfig.checkIntervalSec}s, trailing ${autoConfig.trailingDropPct}% from peak, Soft SL:-${autoConfig.softSlPct}%/${autoConfig.softSlWaitSec}s, Hard SL:-${autoConfig.hardSlPct}%, fast-check: bundler 3s + softSL 3s + liqDrain 10s + rug 3s)`);
+  console.log(`[AUTO] Monitor started${modeTag} (unified 2s loop + bundler 3s, max ${MAX_JUPITER_PER_TICK} Jupiter/tick)`);
 
-  // Main monitor loop (PNL, trailing, SL, partial sells)
-  async function tick() {
-    try { await checkPositions(); }
-    catch (e) { console.error('[AUTO] Monitor error:', e.message); }
-    setTimeout(tick, autoConfig.checkIntervalSec * 1000);
-  }
-  setTimeout(tick, autoConfig.checkIntervalSec * 1000);
-
-  // Danger fast-check loop (3s independent — catches hard SL during soft wait + liquidity drain)
-  let softSlRunning = false;
-  async function softSlTick() {
-    if (softSlRunning) return;
-    softSlRunning = true;
-    try {
-      const isDryMode = autoConfig.mode === 'dry_run';
-      const allPos = isDryMode ? dryRun.getOpenDryPositions() : getOpenPositions();
-
-      // ── Part A: Soft SL fast-check (positions in soft SL waiting state) ──
-      const softWaiting = allPos.filter(p => p.softSlTriggeredAt);
-      if (softWaiting.length > 0) {
-        const softSlPct = autoConfig.softSlPct || 20;
-        const hardSlPct = autoConfig.hardSlPct || autoConfig.slPct || 25;
-        const softSlWaitSec = autoConfig.softSlWaitSec || 30;
-
-        for (const pos of softWaiting) {
-          if (!acquireSellLock(pos.tokenMint)) continue;
-          try {
-            // Get live price via Jupiter quote
-            const { getQuote, SOL_MINT } = require('./trading');
-            const rawAmount = Math.floor(pos.remainingTokens * Math.pow(10, pos.decimals));
-            const quote = await getQuote(pos.tokenMint, SOL_MINT, rawAmount, 500);
-            const quoteSolOut = parseFloat(quote.outAmount) / 1e9;
-            // H1 FIX: Use consistent PNL calc that accounts for partial sells
-            const totalValueSol = quoteSolOut + (pos.totalSolReceived || 0);
-            const pnlSol = totalValueSol - pos.solSpent;
-            const pnlPct = pos.solSpent > 0 ? (pnlSol / pos.solSpent * 100) : 0;
-
-            // Layer 2: Hard SL — instant sell during soft wait
-            if (pnlPct <= -hardSlPct) {
-              console.log(`[SOFT-SL-FAST] ${pos.symbol}: HARD SL hit during soft wait (${pnlPct.toFixed(1)}% <= -${hardSlPct}%) — instant sell`);
-              await executeFullExit(pos, `HARD SL (during soft wait, ${pnlPct.toFixed(1)}%)`, quoteSolOut, { lockHeld: true });
-              continue;
-            }
-
-            // Layer 1: Soft SL timer expired — sell if still below threshold
-            const elapsed = (Date.now() - pos.softSlTriggeredAt) / 1000;
-            if (elapsed >= softSlWaitSec && pnlPct <= -softSlPct) {
-              console.log(`[SOFT-SL-FAST] ${pos.symbol}: Soft SL timer expired (${elapsed.toFixed(0)}s >= ${softSlWaitSec}s, PNL ${pnlPct.toFixed(1)}%) — selling`);
-              await executeFullExit(pos, `Soft SL (fast-check, waited ${Math.round(elapsed)}s)`, quoteSolOut, { lockHeld: true });
-              continue;
-            }
-
-            // Recovery: PNL recovered above soft SL
-            if (pnlPct > -softSlPct) {
-              if (isDryMode) dryRun.updateDryPosition(pos.tokenMint, { softSlTriggeredAt: null });
-              else { const { updatePosition } = require('./positions'); updatePosition(pos.tokenMint, { softSlTriggeredAt: null }); }
-              console.log(`[SOFT-SL-FAST] ${pos.symbol}: recovered (${pnlPct.toFixed(1)}% > -${softSlPct}%) — timer reset`);
-            }
-          } catch (e) {
-            // Jupiter quote failed — skip, main loop will handle NO_ROUTES
-            console.log(`[SOFT-SL-FAST] ${pos.symbol}: quote error (${e.message?.slice(0, 50)}), skipping`);
-          } finally {
-            releaseSellLock(pos.tokenMint);
-          }
-        }
-      }
-
-      // ── Part B: Liquidity drain fast-check (configurable) ──
-      if (autoConfig.liqDrainEnabled !== false) {
-        const liqCheckNow = Date.now();
-        const liqCheckInterval = (autoConfig.liqDrainCheckSec || 10) * 1000;
-        const liqWarnPct = autoConfig.liqDrainWarnPct || 30;
-        const liqMinLiq = autoConfig.liqDrainMinLiq || 1000;
-
-        for (const pos of allPos) {
-          const lastLiqCheck = pos._lastLiqCheck || 0;
-          if (liqCheckNow - lastLiqCheck < liqCheckInterval) continue;
-          if (!pos.gmgnSnapshot?.liquidity || pos.gmgnSnapshot.liquidity < liqMinLiq) continue;
-          const liqExitPct = pos.gmgnSnapshot?.entryRiskScore >= 60
-            ? Math.min(autoConfig.liqDrainExitPct || 50, 20)
-            : (autoConfig.liqDrainExitPct || 50);
-
-        if (!acquireSellLock(pos.tokenMint)) continue;
-        try {
-          const curData = await gmgnTokenInfo(pos.tokenMint);
-          const rawLiq = curData?.pool?.liquidity;
-          const curLiq = parseFloat(rawLiq);
-          const entryLiq = pos.gmgnSnapshot.liquidity;
-          // Mark check time after successful data parse to avoid skipping on API failure
-          if (isDryMode) dryRun.updateDryPosition(pos.tokenMint, { _lastLiqCheck: liqCheckNow });
-          else updatePosition(pos.tokenMint, { _lastLiqCheck: liqCheckNow });
-
-          // Skip if API returns null/undefined/NaN (actual API failure)
-          if (!Number.isFinite(curLiq) || entryLiq <= 0) {
-            if (curLiq === 0) {
-              // $0 liquidity = real rug, NOT API glitch — trigger instant exit
-              console.log(`[LIQ-DRAIN] ${pos.symbol}: liquidity dropped to $0 — RUG, instant exit`);
-              const { closePosition: liqClose } = require('./positions');
-              try {
-                const closeResult = await sellAll(pos.tokenMint, autoConfig.walletLabel, 500);
-                if (closeResult.success) {
-                  const closed = liqClose(pos.tokenMint, closeResult.outputSol, closeResult.signature, 'liq_drain_100%');
-                  setPostCloseLock(pos.tokenMint);
-                  releaseSellLock(pos.tokenMint);
-                  const emoji = (closed.pnl || 0) >= 0 ? '🟢' : '🔴';
-                  sendTelegram(`${emoji} <b>Auto-Sell (Liq Drain 100%): ${pos.symbol}</b>\n\n💰 Got: ${(closeResult.outputSol || 0).toFixed(4)} SOL\n📊 PNL: ${(closed.pnl || 0) >= 0 ? '+' : ''}${(closed.pnl || 0).toFixed(4)} SOL (${(closed.pnlPct || 0)}%)\n🔗 <a href="https://solscan.io/tx/${closeResult.signature}">TX</a>`).catch(() => {});
-                } else {
-                  // Can't sell — close as loss
-                  const closed = liqClose(pos.tokenMint, 0, '', 'liq_drain_no_routes');
-                  setPostCloseLock(pos.tokenMint);
-                  releaseSellLock(pos.tokenMint);
-                  sendTelegram(`🔴 <b>Auto-Close (Liq Drain + No Routes): ${pos.symbol}</b>\n\n📊 PNL: -${(pos.solSpent || 0).toFixed(4)} SOL (total loss)\n📝 Token is dead — position closed`).catch(() => {});
-                }
-              } catch (sellErr) {
-                console.error(`[LIQ-DRAIN] ${pos.symbol}: sell failed: ${sellErr.message}`);
-                if (sellErr.message?.includes("NO_ROUTES") || sellErr.message?.includes("No routes") || sellErr.message?.includes("No routes found")) {
-                  const { closePosition: liqDeadClose } = require("./positions");
-                  try { liqDeadClose(pos.tokenMint, 0, "", "liq_drain_no_routes"); } catch(_) {}
-                  setPostCloseLock(pos.tokenMint);
-                  sendTelegram(`🔴 <b>Auto-Close (Liq Drain + No Routes): ${pos.symbol}</b>\n\n📊 PNL: -${(pos.solSpent || 0).toFixed(4)} SOL (total loss)\n📝 Token is dead`).catch(() => {});
-                }
-                releaseSellLock(pos.tokenMint);
-              }
-              continue;
-            }
-            console.log(`[LIQ-DRAIN] ${pos.symbol}: GMGN returned invalid liq (NaN/undefined) — skipping`);
-            releaseSellLock(pos.tokenMint); continue;
-          }
-
-          const liqDrop = ((entryLiq - curLiq) / entryLiq) * 100;
-
-          if (liqDrop >= liqExitPct) {
-            console.log(`[LIQ-DRAIN] ${pos.symbol}: liquidity dropped ${liqDrop.toFixed(0)}% ($${Math.round(entryLiq)} → $${Math.round(curLiq)}) — instant exit`);
-            // Get quote for accurate PNL in notifications
-            let liqQuoteSol = 0;
-            try {
-              const { getQuote: lqGetQuote, SOL_MINT: lqSol } = require('./trading');
-              const lqRaw = Math.floor(pos.remainingTokens * Math.pow(10, pos.decimals));
-              const lqQuote = await lqGetQuote(pos.tokenMint, lqSol, lqRaw, 500);
-              liqQuoteSol = parseFloat(lqQuote.outAmount) / 1e9;
-            } catch (_) {}
-
-            // Fallback 1: use GMGN current price (convert USD → SOL)
-            if (liqQuoteSol <= 0 && pos.remainingTokens > 0) {
-              try {
-                const curPriceUSD = parseFloat(curData?.price?.price || 0);
-                if (curPriceUSD > 0) {
-                  if (!global._solPriceUsd || Date.now() - (global._solPriceTs || 0) > 60000) {
-                    const resp = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd');
-                    const d = await resp.json();
-                    global._solPriceUsd = d.solana.usd;
-                    global._solPriceTs = Date.now();
-                  }
-                  const curPriceSOL = curPriceUSD / global._solPriceUsd;
-                  liqQuoteSol = pos.remainingTokens * curPriceSOL;
-                  console.log(`[LIQ-DRAIN] ${pos.symbol}: Jupiter failed, used GMGN price ($${curPriceUSD}) → ${liqQuoteSol.toFixed(4)} SOL`);
-                }
-              } catch (_) {}
-            }
-            // Fallback 2: estimate from entry price × liq drop ratio
-            if (liqQuoteSol <= 0 && pos.entryPrice > 0 && pos.remainingTokens > 0) {
-              liqQuoteSol = pos.remainingTokens * pos.entryPrice * ((100 - liqDrop) / 100);
-              console.log(`[LIQ-DRAIN] ${pos.symbol}: All sources failed, estimated ${liqQuoteSol.toFixed(4)} SOL from liqDrop`);
-            }
-            await executeFullExit(pos, `Liq Drain (-${liqDrop.toFixed(0)}%, $${Math.round(entryLiq)}→$${Math.round(curLiq)})`, liqQuoteSol, { lockHeld: true });
-          } else if (liqDrop >= liqWarnPct) {
-            // Warning at 30% — don't sell yet, but alert
-            console.log(`[LIQ-DRAIN] ${pos.symbol}: liquidity warning ${liqDrop.toFixed(0)}% drop ($${Math.round(entryLiq)} → $${Math.round(curLiq)})`);
-            if (!pos._liqWarnSent) {
-              if (isDryMode) dryRun.updateDryPosition(pos.tokenMint, { _liqWarnSent: true });
-              else updatePosition(pos.tokenMint, { _liqWarnSent: true });
-              sendTelegram(
-                `⚠️ <b>Liquidity Warning: ${pos.symbol}</b>\n\n` +
-                `💧 Liq: $${Math.round(entryLiq).toLocaleString()} → $${Math.round(curLiq).toLocaleString()} (-${liqDrop.toFixed(0)}%)\n` +
-                `🛑 Auto-exit if drops below ${liqExitPct}%`,
-                { parse_mode: 'HTML' }
-              ).catch(() => {});
-            }
-          }
-          releaseSellLock(pos.tokenMint);
-        } catch (e) {
-          releaseSellLock(pos.tokenMint);
-          console.log(`[LIQ-DRAIN] ${pos.symbol}: GMGN error (${e.message?.slice(0, 50)}), skipping`);
-        }
-      }
-      }
-    } catch (e) {
-      console.error('[DANGER-FAST] Loop error:', e.message);
-    } finally {
-      softSlRunning = false;
-    }
-    setTimeout(softSlTick, 3000);
-  }
-  setTimeout(softSlTick, 1500); // start after 1.5s (offset from bundler loop)
-
-  // Rug fast-check loop — OPTIMIZED: GMGN-first, Jupiter-on-demand, sequential with delay
-  // Reduces API calls from ~10/sec to ≤2/sec while keeping rug detection latency under 10s
-  let rugRunning = false;
-  let _rugTickNum = 0; // tick counter for Jupiter rate-limiting
-  async function rugTick() {
-    if (rugRunning) return;
-    rugRunning = true;
-    try {
-      const isDryMode = autoConfig.mode === 'dry_run';
-      const allPos = isDryMode ? dryRun.getOpenDryPositions() : getOpenPositions();
-      const now = Date.now();
-
-      // Filter positions that need rug check (throttle 1s per position)
-      const toCheck = allPos.filter(p => p.gmgnSnapshot && (now - (p.lastRugCheck || 0)) >= 1000);
-
-      // Sequential processing with 1500ms stagger between positions (replaces parallel Promise.allSettled)
-      // This naturally rate-limits: 5 positions × (500ms GMGN + 1500ms delay) = ~10s per cycle
-      for (let i = 0; i < toCheck.length; i++) {
-        _rugTickNum++;
-        const pos = toCheck[i];
-        await processOnePosition(pos, isDryMode);
-        // Stagger: 1500ms delay between positions (skip after last)
-        if (i < toCheck.length - 1) {
-          await new Promise(r => setTimeout(r, 1500));
-        }
-      }
-    } catch (e) {
-      console.error('[RUG-FAST] Loop error:', e.message);
-    } finally {
-      rugRunning = false;
-      setTimeout(rugTick, 2000); // 2s between cycles (was 1s — matched to staggered processing time)
-    }
-  }
-
-  // Process a single position: GMGN-first, Jupiter conditional
-  async function processOnePosition(pos, isDryMode) {
-    const checkNow = Date.now();
-
-    // STEP 1: GMGN fetch (primary data source — holders, liquidity, top10, creator, sell/buy vol, entrapment)
-    let gmgnData = null;
-    try {
-      gmgnData = await gmgnFetch('sol', pos.tokenMint);
-    } catch (gmgnErr) {
-      // GMGN failed — fall through to checkRugSignals which has its own retry logic
-      console.log(`[RUG-FAST] ${pos.symbol}: GMGN fetch failed (${gmgnErr.message?.slice(0, 50)}), will retry in checkRugSignals`);
-    }
-
-    // STEP 2: GMGN dead-token detection (replaces Jupiter NO_ROUTES pre-check)
-    // If holders=0 AND liquidity=0, token is dead — no Jupiter call needed
-    if (gmgnData) {
-      const gPool = gmgnData.pool || {};
-      const gHolders = gmgnData.holder_count || 0;
-      const gLiq = parseFloat(gPool.liquidity || 0);
-      if (gHolders === 0 && gLiq === 0) {
-        if (isDryMode) dryRun.updateDryPosition(pos.tokenMint, { lastRugCheck: checkNow });
-        else updatePosition(pos.tokenMint, { lastRugCheck: checkNow });
-        console.log(`[RUG-FAST] 💀 ${pos.symbol}: GMGN dead (0 holders, $0 liq) — triggering exit`);
-        if (acquireSellLock(pos.tokenMint)) {
-          await executeFullExit(pos, 'rug_gmgn_dead', 0, { lockHeld: true });
-        } else {
-          console.log(`[RUG-FAST] ${pos.symbol}: sell lock held, skipping dead exit`);
-        }
-        return;
-      }
-    }
-
-    // STEP 2b: Absolute Top10 level — hard exit if Top10 > threshold AND token age > minAge
-    // Bypasses scoring system entirely (direct action, not probabilistic)
-    // New tokens have naturally high Top10 — only triggers after minAge
-    if (gmgnData && autoConfig.top10ExitEnabled !== false) {
-      const gDev = gmgnData.dev || {};
-      const curTop10Abs = parseFloat(gDev.top_10_holder_rate || 0);
-      const ageMs = pos.openedAt ? (Date.now() - new Date(pos.openedAt).getTime()) : 0;
-      const top10Threshold = (autoConfig.top10ExitPct || 24) / 100;
-      const top10MinAgeMs = (autoConfig.top10ExitMinAgeSec || 300) * 1000;
-      if (ageMs > top10MinAgeMs && curTop10Abs > top10Threshold) {
-        if (isDryMode) dryRun.updateDryPosition(pos.tokenMint, { lastRugCheck: checkNow });
-        else updatePosition(pos.tokenMint, { lastRugCheck: checkNow });
-        console.log(`[RUG-FAST] 🚨 ${pos.symbol}: Top10 ${(curTop10Abs*100).toFixed(1)}% > ${autoConfig.top10ExitPct || 24}% (age ${Math.round(ageMs/60000)}min) — hard exit`);
-        const top10Msg = [
-          `🚨 <b>TOP10 EXIT: ${pos.symbol}</b>`,
-          ``,
-          `Top10 holders: <b>${(curTop10Abs*100).toFixed(1)}%</b> (> ${autoConfig.top10ExitPct || 24}% threshold)`,
-          `Age: ${Math.round(ageMs/60000)} min`,
-          `PNL: ${pos.solSpent > 0 ? (((pos.totalSolReceived || 0) - pos.solSpent) / pos.solSpent * 100).toFixed(1) : '?'}%`,
-          ``,
-          `Top10 concentration too high — auto exit.`,
-        ].join('\n');
-        sendTelegram(top10Msg, { parse_mode: 'HTML' }).catch(() => {});
-        if (acquireSellLock(pos.tokenMint)) {
-          await executeFullExit(pos, `Top10 absolute ${(curTop10Abs*100).toFixed(1)}%`, 0, { lockHeld: true });
-        }
-        return;
-      }
-    }
-
-    // STEP 3: Jupiter getQuote — CONDITIONAL (reduces calls from 5/sec to ~1/sec)
-    // Strategy: call Jupiter every 3rd tick per position (staggered across positions)
-    // OR when GMGN data shows suspicious signals (red flag triggered)
-    let needJupiter = false;
-
-    // Every 3rd global tick — ensures price freshness even during calm periods
-    if (_rugTickNum % 3 === 0) {
-      needJupiter = true;
-    }
-
-    // GMGN red flags — need real-time price for hard SL + PNL accuracy
-    if (gmgnData) {
-      const gPool = gmgnData.pool || {};
-      const gStat = gmgnData.stat || {};
-      const gHolders = gmgnData.holder_count || 0;
-      const gLiq = parseFloat(gPool.liquidity || 0);
-      const gSellVol5m = parseFloat(gStat.sell_volume_5m || 0);
-      const gBuyVol5m = parseFloat(gStat.buy_volume_5m || 0);
-
-      const snap = pos.gmgnSnapshot;
-      // Holder drop > 10%
-      if (snap && snap.holders > 10 && gHolders > 0 && ((snap.holders - gHolders) / snap.holders) > 0.10) {
-        needJupiter = true;
-      }
-      // Liquidity drop > 15%
-      if (snap && snap.liquidity > 1000 && gLiq > 0 && ((snap.liquidity - gLiq) / snap.liquidity) > 0.15) {
-        needJupiter = true;
-      }
-      // Sell pressure > 3x buys
-      if (gSellVol5m > 0 && gBuyVol5m > 0 && gSellVol5m / gBuyVol5m > 3) {
-        needJupiter = true;
-      }
-      // Zero buys in 5m
-      if (gSellVol5m > 0 && gBuyVol5m === 0) {
-        needJupiter = true;
-      }
-    }
-
-    if (needJupiter) {
-      try {
-        const nrRaw = Math.floor(pos.remainingTokens * Math.pow(10, pos.decimals || 6));
-        if (nrRaw > 0 && pos.remainingTokens > 0) {
-          const nrQ = await getQuote(pos.tokenMint, SOL_MINT, nrRaw, 500);
-          pos._lastRugQuoteSol = parseFloat(nrQ.outAmount) / 1e9; // cache for checkRugSignals + hard SL
-          // Also update priceImpact for Signal 6 in checkRugSignals
-          const _impactUpdate = {
-            _prevPriceImpact: pos._lastPriceImpact || 0,
-            _prevPriceImpactTs: Date.now(),
-            _lastPriceImpact: parseFloat(nrQ.priceImpactPct || 0),
-          };
-          if (isDryMode) dryRun.updateDryPosition(pos.tokenMint, _impactUpdate);
-          else updatePosition(pos.tokenMint, _impactUpdate);
-        }
-      } catch (nrErr) {
-        const nrMsg = nrErr.message || '';
-        if (nrMsg.includes('NO_ROUTES_FOUND') || nrMsg.includes('No routes found')) {
-          // Dead token via Jupiter — update check time and exit
-          if (isDryMode) dryRun.updateDryPosition(pos.tokenMint, { lastRugCheck: checkNow });
-          else updatePosition(pos.tokenMint, { lastRugCheck: checkNow });
-          console.log(`[RUG-FAST] 💀 ${pos.symbol}: NO_ROUTES — token dead, triggering exit`);
-          if (acquireSellLock(pos.tokenMint)) {
-            await executeFullExit(pos, 'rug_no_routes', 0, { lockHeld: true });
-          } else {
-            console.log(`[RUG-FAST] ${pos.symbol}: sell lock held, skipping no_routes exit`);
-          }
-          return;
-        }
-        // Other Jupiter errors — continue with GMGN-only data
-      }
-    }
-
-    // Update check time
-    if (isDryMode) dryRun.updateDryPosition(pos.tokenMint, { lastRugCheck: checkNow });
-    else updatePosition(pos.tokenMint, { lastRugCheck: checkNow });
-
-    // STEP 4: Run rug signal detection (uses GMGN data + cached Jupiter quote)
-    const rugResult = await checkRugSignals(pos);
-
-    // Reuse cached quote from Jupiter (or 0 if Jupiter was skipped)
-    const rugQuoteSol = pos._lastRugQuoteSol || 0;
-    const rugCurrentPrice = pos.remainingTokens > 0 ? rugQuoteSol / pos.remainingTokens : (pos.entryPrice || 0);
-    const curPnlPct = pos.solSpent > 0 ? (((rugQuoteSol + (pos.totalSolReceived || 0)) - pos.solSpent) / pos.solSpent * 100) : 0;
-
-    // Hard SL enforcement at 1s frequency (supplements checkPositions 15s cycle)
-    // Consecutive confirmation: require 2 consecutive hits to prevent false positives from quote flukes
-    const rtHardSlPct = pos.hardSlPct || autoConfig.hardSlPct || autoConfig.slPct || 25;
-    if (rugQuoteSol > 0 && curPnlPct <= -rtHardSlPct) {
-      const now = Date.now();
-      const prevHit = pos._hardSlFastHit || 0;
-      if (now - prevHit > 3000) {
-        // First hit — record timestamp, wait for confirmation on next tick
-        if (isDryMode) dryRun.updateDryPosition(pos.tokenMint, { _hardSlFastHit: now });
-        else updatePosition(pos.tokenMint, { _hardSlFastHit: now });
-        console.log(`[RUG-FAST] ⚠️ ${pos.symbol}: Hard SL candidate ${curPnlPct.toFixed(1)}% (≤-${rtHardSlPct}%) — confirming next tick...`);
-      } else {
-        // Confirmed hit (within 3s) — execute
-        if (acquireSellLock(pos.tokenMint)) {
-          console.log(`[RUG-FAST] ⛔ ${pos.symbol}: Hard SL CONFIRMED ${curPnlPct.toFixed(1)}% (≤-${rtHardSlPct}%) — 1s enforce`);
-          await executeFullExit(pos, `HARD SL (fast, ${curPnlPct.toFixed(1)}%)`, rugQuoteSol, { lockHeld: true });
-        }
-      }
-      return;
-    } else if (rugQuoteSol > 0) {
-      // Price recovered above hard SL — clear confirmation flag
-      if (pos._hardSlFastHit) {
-        if (isDryMode) dryRun.updateDryPosition(pos.tokenMint, { _hardSlFastHit: 0 });
-        else updatePosition(pos.tokenMint, { _hardSlFastHit: 0 });
-        console.log(`[RUG-FAST] ✅ ${pos.symbol}: Hard SL candidate recovered (${curPnlPct.toFixed(1)}% > -${rtHardSlPct}%) — cleared`);
-      }
-    }
-
-        const rugLevel = rugResult.rugLevel || (rugResult.isRug ? 'exit' : 'safe');
-
-        if (rugLevel === 'watch') {
-          // FIX 4: Clear rug confirmation if level dropped below partial
-          if (pos._rugConfLevel) {
-            const clearData = { _rugConfLevel: '', _rugConfTs: 0, _rugConfCount: 0 };
-            if (isDryMode) dryRun.updateDryPosition(pos.tokenMint, clearData);
-            else updatePosition(pos.tokenMint, clearData);
-          }
-          console.log(`[RUG-FAST] 👀 ${pos.symbol}: watch (score ${rugResult.rugScore}) — ${rugResult.signals.join(', ')}`);
-          return;
-        }
-        if (rugLevel === 'safe') {
-          // FIX 4: Clear rug confirmation if level dropped
-          if (pos._rugConfLevel) {
-            const clearData = { _rugConfLevel: '', _rugConfTs: 0, _rugConfCount: 0 };
-            if (isDryMode) dryRun.updateDryPosition(pos.tokenMint, clearData);
-            else updatePosition(pos.tokenMint, clearData);
-          }
-          return;
-        }
-
-        if (rugLevel === 'warn') {
-          // FIX 4: Clear rug confirmation if level dropped below partial
-          if (pos._rugConfLevel) {
-            const clearData = { _rugConfLevel: '', _rugConfTs: 0, _rugConfCount: 0 };
-            if (isDryMode) dryRun.updateDryPosition(pos.tokenMint, clearData);
-            else updatePosition(pos.tokenMint, clearData);
-          }
-          // Alert only — no sell, wait for escalation
-          const lastWarnLevel = pos._rugWarnLevel || 'safe';
-          if (lastWarnLevel === 'safe') {
-            const warnMsg = [
-              `⚠️ <b>RUG EARLY WARNING: ${pos.symbol}</b>`,
-              ``,
-              `PNL: ${curPnlPct.toFixed(1)}%  Score: ${rugResult.rugScore}`,
-              ``,
-              `⚠️ Signals:`,
-              ...rugResult.signals.map(s => `• ${s}`),
-              ``,
-              `Watching — will sell if signals escalate.`,
-            ].join('\n');
-            sendTelegram(warnMsg, { parse_mode: 'HTML' }).catch(() => {});
-            if (isDryMode) dryRun.updateDryPosition(pos.tokenMint, { _rugWarnLevel: 'warn' });
-            else updatePosition(pos.tokenMint, { _rugWarnLevel: 'warn' });
-            console.log(`[RUG-FAST] ⚠️ ${pos.symbol}: warn (score ${rugResult.rugScore}) — ${rugResult.signals.join(', ')}`);
-          }
-        } else if (rugLevel === 'partial') {
-          // FIX 4: Consecutive confirmation — require 2 consecutive ticks at same level within 3s
-          const rugConfLevel = pos._rugConfLevel || '';
-          const rugConfTs = pos._rugConfTs || 0;
-          const rugConfCount = pos._rugConfCount || 0;
-          const confAge = Date.now() - rugConfTs;
-
-          if (rugConfLevel !== 'partial' || confAge > 3000 || rugConfCount >= 2) {
-            // First tick at this level, or timeout, or already confirmed — reset
-            if (isDryMode) dryRun.updateDryPosition(pos.tokenMint, { _rugConfLevel: 'partial', _rugConfTs: Date.now(), _rugConfCount: 1 });
-            else updatePosition(pos.tokenMint, { _rugConfLevel: 'partial', _rugConfTs: Date.now(), _rugConfCount: 1 });
-            console.log(`[RUG-FAST] ${pos.symbol}: partial (score ${rugResult.rugScore}) — confirming next tick...`);
-            return;
-          }
-          // Second tick within 3s — CONFIRMED
-          if (isDryMode) dryRun.updateDryPosition(pos.tokenMint, { _rugConfCount: 2 });
-          else updatePosition(pos.tokenMint, { _rugConfCount: 2 });
-
-          // Sell 50% — hedge while still sellable
-          if (!pos._rugPartialSold) {
-            if (!acquireSellLock(pos.tokenMint)) {
-              console.log(`[RUG-FAST] ${pos.symbol}: sell lock held, skipping partial`);
-              return;
-            }
-            try {
-              console.log(`[RUG-FAST] 🟡 ${pos.symbol}: partial exit triggered (score ${rugResult.rugScore}) — ${rugResult.signals.join(', ')}`);
-              const partialMsg = [
-                `🟡 <b>RUG PARTIAL EXIT: ${pos.symbol}</b>`,
-                ``,
-                `PNL: ${curPnlPct.toFixed(1)}%  Score: ${rugResult.rugScore}`,
-                ``,
-                `⚠️ Signals:`,
-                ...rugResult.signals.map(s => `• ${s}`),
-                ``,
-                `Selling 50% now — holding rest in case of recovery.`,
-              ].join('\n');
-              sendTelegram(partialMsg, { parse_mode: 'HTML' }).catch(() => {});
-              if (isDryMode) dryRun.updateDryPosition(pos.tokenMint, { _rugWarnLevel: 'partial' });
-              else updatePosition(pos.tokenMint, { _rugWarnLevel: 'partial' });
-              const freshPos = isDryMode
-                ? dryRun.getOpenDryPositions().find(p => p.tokenMint === pos.tokenMint)
-                : getPosition(pos.tokenMint);
-              await executePartialSell(freshPos || pos, { sellPct: 50, atPct: -1 }, rugCurrentPrice);
-              // Mark as sold AFTER successful sell — if sell throws, retry next tick
-              if (isDryMode) dryRun.updateDryPosition(pos.tokenMint, { _rugPartialSold: true });
-              else updatePosition(pos.tokenMint, { _rugPartialSold: true });
-            } finally {
-              releaseSellLock(pos.tokenMint);
-            }
-          }
-        } else if (rugLevel === 'exit') {
-          // FIX 4: Consecutive confirmation for exit level
-          const rugConfLevel = pos._rugConfLevel || '';
-          const rugConfTs = pos._rugConfTs || 0;
-          const rugConfCount = pos._rugConfCount || 0;
-          const confAge = Date.now() - rugConfTs;
-
-          if (rugConfLevel !== 'exit' || confAge > 3000 || rugConfCount >= 2) {
-            // First tick at this level, or timeout, or already confirmed — reset
-            if (isDryMode) dryRun.updateDryPosition(pos.tokenMint, { _rugConfLevel: 'exit', _rugConfTs: Date.now(), _rugConfCount: 1 });
-            else updatePosition(pos.tokenMint, { _rugConfLevel: 'exit', _rugConfTs: Date.now(), _rugConfCount: 1 });
-            console.log(`[RUG-FAST] ${pos.symbol}: exit (score ${rugResult.rugScore}) — confirming next tick...`);
-            return;
-          }
-          // Second tick within 3s — CONFIRMED
-          if (isDryMode) dryRun.updateDryPosition(pos.tokenMint, { _rugConfCount: 2 });
-          else updatePosition(pos.tokenMint, { _rugConfCount: 2 });
-
-          // Full exit — sell everything
-          console.log(`[RUG-FAST] 🚨 ${pos.symbol}: ${rugResult.signals.join(', ')}`);
-          const rugAlertMsg = [
-            `🚨 <b>RUG SIGNAL DETECTED</b>`,
-            ``,
-            `Token: <b>${pos.symbol || 'Unknown'}</b>`,
-            `CA: <code>${pos.tokenMint}</code>`,
-            `Entry: ${pos.solSpent?.toFixed(4) || '?'} SOL`,
-            `PNL: ${curPnlPct.toFixed(1)}%`,
-            ``,
-            `⚠️ Signals:`,
-            ...rugResult.signals.map(s => `• ${s}`),
-            ``,
-            `Selling immediately...`,
-          ].join('\n');
-          sendTelegram(rugAlertMsg, { parse_mode: 'HTML' }).catch(() => {});
-          if (acquireSellLock(pos.tokenMint)) {
-            await executeFullExit(pos, `rug_signal: ${rugResult.signals.join(', ')}`, rugQuoteSol, { lockHeld: true });
-          } else {
-            console.log(`[RUG-FAST] ${pos.symbol}: sell lock held, will retry next cycle`);
-          }
-        }
-  }
-  setTimeout(rugTick, 2000); // start after 2s (offset from other loops)
+  // Unified safety loop (replaces tick + softSlTick + rugTick)
+  setTimeout(unifiedTick, 1000);
 
   // Bundler fast loop (3s independent — catches bursts before dump)
   async function bundlerTick() {
