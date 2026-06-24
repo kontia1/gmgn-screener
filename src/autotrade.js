@@ -352,8 +352,19 @@ async function autoBuy(tokenData) {
         volume: tokenData.volume_24h || tokenData.volume || 0,
         buys: tokenData.buys_24h || tokenData.buys || 0,
         sells: tokenData.sells_24h || tokenData.sells || 0,
+        buyRatio: (tokenData.buys_24h || tokenData.buys || 0) > 0 && (tokenData.sells_24h || tokenData.sells || 0) > 0
+          ? ((tokenData.buys_24h || tokenData.buys || 0) / (tokenData.sells_24h || tokenData.sells || 1))
+          : 0,
+        priceChange5m: tokenData.price_change_percent5m || 0,
+        priceChange1h: tokenData.price_change_percent1h || 0,
+        fdv: tokenData.fdv || 0,
+        website: tokenData.website || '',
+        twitter: tokenData.twitter_username || '',
+        telegram: tokenData.telegram || '',
         entryRiskScore,
         snapshotAt: Date.now(),
+        source: tokenData._source || 'unknown',
+        ageMin: tokenData._ageMin || 0,
       },
     });
 
@@ -457,8 +468,19 @@ async function autoBuy(tokenData) {
           volume: tokenData.volume_24h || tokenData.volume || 0,
           buys: tokenData.buys_24h || tokenData.buys || 0,
           sells: tokenData.sells_24h || tokenData.sells || 0,
+          buyRatio: (tokenData.buys_24h || tokenData.buys || 0) > 0 && (tokenData.sells_24h || tokenData.sells || 0) > 0
+            ? ((tokenData.buys_24h || tokenData.buys || 0) / (tokenData.sells_24h || tokenData.sells || 1))
+            : 0,
+          priceChange5m: tokenData.price_change_percent5m || 0,
+          priceChange1h: tokenData.price_change_percent1h || 0,
+          fdv: tokenData.fdv || 0,
+          website: tokenData.website || '',
+          twitter: tokenData.twitter_username || '',
+          telegram: tokenData.telegram || '',
           entryRiskScore,
           snapshotAt: Date.now(),
+          source: tokenData._source || 'unknown',
+          ageMin: tokenData._ageMin || 0,
         },
       });
 
@@ -1985,6 +2007,134 @@ async function processUnifiedPosition(pos, isDryMode) {
   }
 }
 
+// ─── Force-Probe Route (5s independent — catches stale-price LP pulls) ──
+// Verifies Jupiter swap route exists even when Price API returns valid prices.
+// Catches scenarios where LP was pulled but Price API still returns cached data.
+let forceProbeRunning = false;
+const FORCE_PROBE_INTERVAL_MS = 5000; // 5s
+const FORCE_PROBE_FAIL_THRESHOLD = 2; // 2 consecutive fails → auto-close
+const FORCE_PROBE_GRACE_MS = 60_000; // 60s grace period after buy
+
+// Module-level import (avoid require() in hot loop)
+let _probeGetQuote = null;
+let _probeSOL_MINT = null;
+function ensureProbeImports() {
+  if (!_probeGetQuote) {
+    const t = require('./trading');
+    _probeGetQuote = t.getQuote;
+    _probeSOL_MINT = t.SOL_MINT;
+  }
+}
+
+async function forceProbeTick() {
+  if (forceProbeRunning) {
+    setTimeout(forceProbeTick, FORCE_PROBE_INTERVAL_MS);
+    return;
+  }
+  forceProbeRunning = true;
+  try {
+    ensureProbeImports();
+    const isDryMode = autoConfig.mode === 'dry_run';
+    const allPos = isDryMode ? dryRun.getOpenDryPositions() : getOpenPositions();
+    if (!allPos.length) return;
+
+    for (let i = 0; i < allPos.length; i++) {
+      const pos = allPos[i];
+
+      // Grace period: skip positions bought within last 60s
+      const ageMs = Date.now() - (pos.openedAt || 0);
+      if (ageMs < FORCE_PROBE_GRACE_MS) continue;
+
+      // Atomic lock check + acquire (no TOCTOU gap)
+      if (!acquireSellLock(pos.tokenMint)) {
+        // Another sell in progress — skip this position
+        continue;
+      }
+      // We own the lock — release after probe (unless we trigger exit)
+      let lockReleased = false;
+      try {
+        // Probe: quote selling entire remaining tokens to SOL
+        const rawAmount = Math.floor(pos.remainingTokens * Math.pow(10, pos.decimals || 6));
+        if (rawAmount <= 0) {
+          releaseSellLock(pos.tokenMint);
+          lockReleased = true;
+          continue;
+        }
+
+        const quote = await _probeGetQuote(pos.tokenMint, _probeSOL_MINT, rawAmount, 500);
+
+        if (quote && quote.outAmount && parseFloat(quote.outAmount) > 0) {
+          // Route exists — reset fail count
+          if ((pos._routeProbeFailCount || 0) > 0) {
+            console.log(`[PROBE] ${pos.symbol}: route confirmed (was ${pos._routeProbeFailCount} fails)`);
+          }
+          pos._routeProbeFailCount = 0;
+          releaseSellLock(pos.tokenMint);
+          lockReleased = true;
+        } else {
+          // Quote returned but no output — count as fail
+          pos._routeProbeFailCount = (pos._routeProbeFailCount || 0) + 1;
+          console.log(`[PROBE] ${pos.symbol}: no route output (${pos._routeProbeFailCount}/${FORCE_PROBE_FAIL_THRESHOLD})`);
+          releaseSellLock(pos.tokenMint);
+          lockReleased = true;
+        }
+      } catch (e) {
+        const msg = e.message || '';
+        if (msg.includes('429') || msg.includes('Too many requests')) {
+          // Rate limited — don't count as fail, skip this tick
+          console.log(`[PROBE] ${pos.symbol}: 429 rate limited, skipping`);
+          if (!lockReleased) releaseSellLock(pos.tokenMint);
+          continue;
+        }
+        // Quote failed (NO_ROUTES, timeout, etc.) — count as fail
+        pos._routeProbeFailCount = (pos._routeProbeFailCount || 0) + 1;
+        console.log(`[PROBE] ${pos.symbol}: quote failed (${pos._routeProbeFailCount}/${FORCE_PROBE_FAIL_THRESHOLD}) — ${msg.slice(0, 60)}`);
+        if (!lockReleased) releaseSellLock(pos.tokenMint);
+      }
+
+      // Auto-close after threshold (re-acquire lock for exit)
+      if ((pos._routeProbeFailCount || 0) >= FORCE_PROBE_FAIL_THRESHOLD) {
+        console.log(`[PROBE] ${pos.symbol}: route probe failed ${FORCE_PROBE_FAIL_THRESHOLD}x — auto-closing`);
+
+        // Re-acquire lock for exit (released above during probe)
+        if (!acquireSellLock(pos.tokenMint)) {
+          console.log(`[PROBE] ${pos.symbol}: sell lock held by another loop, skipping exit`);
+          continue;
+        }
+
+        try {
+          const lastQuote = pos._lastRugQuoteSol || 0;
+          // executeFullExit with lockHeld=true releases the lock internally
+          await executeFullExit(pos, 'route_probe_failed', lastQuote, { lockHeld: true });
+          setPostCloseLock(pos.tokenMint);
+
+          await sendTelegram(
+            `🔍 <b>Force-Probe: ${pos.symbol}</b>\n\n` +
+            `⚠️ Jupiter route消失 (2x consecutive fails)\n` +
+            `💰 LP likely pulled — auto-closed to prevent holding dead token`,
+            { parse_mode: 'HTML' }
+          ).catch(() => {});
+        } catch (exitErr) {
+          console.error(`[PROBE] ${pos.symbol}: exit failed — ${exitErr.message}`);
+          // executeFullExit releases lock on success OR throws on failure
+          // Only release if executeFullExit threw (lock wasn't released)
+          releaseSellLock(pos.tokenMint);
+        }
+      }
+
+      // Stagger: 200ms between positions
+      if (i < allPos.length - 1) {
+        await new Promise(r => setTimeout(r, 200));
+      }
+    }
+  } catch (e) {
+    console.error('[PROBE] Loop error:', e.message);
+  } finally {
+    forceProbeRunning = false;
+    setTimeout(forceProbeTick, FORCE_PROBE_INTERVAL_MS);
+  }
+}
+
 // ─── Start Position Monitor ────────────────────────────
 function startMonitor() {
   if (monitoring) return;
@@ -1992,7 +2142,7 @@ function startMonitor() {
   loadAutoConfig();
 
   const modeTag = autoConfig.mode === 'dry_run' ? ' [DRY RUN]' : ' [LIVE]';
-  console.log(`[AUTO] Monitor started${modeTag} (unified 2s loop + bundler 3s, max ${MAX_JUPITER_PER_TICK} Jupiter/tick)`);
+  console.log(`[AUTO] Monitor started${modeTag} (unified 2s + bundler 3s + force-probe 5s, max ${MAX_JUPITER_PER_TICK} Jupiter/tick)`);
 
   // Unified safety loop (replaces tick + softSlTick + rugTick)
   setTimeout(unifiedTick, 1000);
@@ -2004,6 +2154,9 @@ function startMonitor() {
     setTimeout(bundlerTick, 3000);
   }
   setTimeout(bundlerTick, 1000); // start after 1s
+
+  // Force-probe loop (5s independent — catches stale-price LP pulls)
+  setTimeout(forceProbeTick, 2000); // start after 2s (offset from bundler)
 }
 
 // ─── Update Config (runtime + persist) ─────────────────

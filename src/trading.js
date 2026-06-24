@@ -19,13 +19,14 @@ function jupHeaders(extra = {}) {
 
 // ─── Jupiter Quote ─────────────────────────────────────
 // maxAccounts omitted = Jupiter determines optimal routing automatically
-async function getQuote(inputMint, outputMint, amount, slippageBps = 300) {
+async function getQuote(inputMint, outputMint, amount, slippageBps = 300, excludeDexes = []) {
   const params = new URLSearchParams({
     inputMint,
     outputMint,
     amount: String(amount),
     slippageBps: String(slippageBps),
   });
+  if (excludeDexes.length) params.set('excludeDexes', excludeDexes.join(','));
   const url = `${JUPITER_API}/quote?${params}`;
 
   // Retry on 429 (rate limit) with exponential backoff
@@ -87,6 +88,26 @@ async function getSwapTx(quote, userPublicKey, priorityFeeLamports = 50000) {
 
 // ─── Buy Token (SOL → Token) ───────────────────────────
 async function buyToken(tokenMint, solAmount, walletLabel = 'default', slippageBps = 300, { _isRetry = false } = {}) {
+  try {
+    return await _jupiterBuy(tokenMint, solAmount, walletLabel, slippageBps, _isRetry);
+  } catch (jupErr) {
+    const msg = jupErr.message || '';
+    // If pAMM broken → fallback to PumpFun bonding curve
+    if (msg.includes('untradeable') || msg.includes('pAMM') || msg.includes('only route')) {
+      console.log(`[TRADE] Jupiter failed (${msg.slice(0,80)}), falling back to PumpFun bonding curve...`);
+      const { pumpFunBuy, isOnBondingCurve } = require('./pumpfun');
+      const onCurve = await isOnBondingCurve(tokenMint);
+      if (!onCurve) {
+        console.log(`[TRADE] Token not on bonding curve (migrated to AMM), cannot fallback`);
+        throw jupErr;
+      }
+      return await pumpFunBuy(tokenMint, solAmount, slippageBps);
+    }
+    throw jupErr;
+  }
+}
+
+async function _jupiterBuy(tokenMint, solAmount, walletLabel, slippageBps, _isRetry) {
   const keypair = getKeypair(walletLabel);
   const conn = getConnection();
 
@@ -130,16 +151,34 @@ async function buyToken(tokenMint, solAmount, walletLabel = 'default', slippageB
 
   // Send — skipPreflight=false lets Solana simulate before submitting, catching error 6001 pre-flight
   let sig;
+  let excludedDexes = [];
   try {
     sig = await conn.sendTransaction(tx, {
       skipPreflight: false,
       maxRetries: 3,
     });
   } catch (sendErr) {
-    // Simulation failed — retry ONCE with a fresh quote (pool state may have changed)
-    console.log(`[TRADE] Simulation/rejection failed: ${sendErr.message} — retrying with fresh quote`);
-    const freshQuote = await getQuote(SOL_MINT, tokenMint, lamports, slippageBps);
-    if (!freshQuote || !freshQuote.outAmount) throw new Error('Fresh quote empty after retry');
+    // Extract failed DEX from error message AND logs array
+    const errStr = sendErr.message || '';
+    const errLogs = Array.isArray(sendErr.logs) ? sendErr.logs.join(' ') : '';
+    const combinedErr = errStr + ' ' + errLogs;
+    const pammMatch = combinedErr.match(/(pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA)/);
+    if (pammMatch) excludedDexes.push(pammMatch[1]);
+    console.log(`[TRADE] Simulation failed: ${errStr.slice(0, 120)} — retrying${excludedDexes.length ? ` (exclude ${excludedDexes[0].slice(0,8)}..)` : ''}`);
+
+    // Get fresh quote (exclude broken DEX)
+    let freshQuote;
+    try { freshQuote = await getQuote(SOL_MINT, tokenMint, lamports, slippageBps, excludedDexes); } catch {}
+    if (!freshQuote || !freshQuote.outAmount) {
+      throw new Error('Token untradeable — no alternate route (pAMM pool broken)');
+    }
+
+    // Check if fresh quote still routes through broken pAMM
+    const freshRouteLabels = (freshQuote.routePlan || []).map(r => (r?.swapInfo?.label || '').toLowerCase()).join(' ');
+    if (excludedDexes.length && freshRouteLabels.includes('pump')) {
+      throw new Error('Token untradeable — only route is broken pAMM pool');
+    }
+
     const freshImpact = parseFloat(freshQuote.priceImpactPct || '0');
     if (freshImpact > 10) {
       throw new Error(`Retry quote price impact too high (${freshImpact.toFixed(2)}%)`);

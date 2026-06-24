@@ -203,7 +203,7 @@ const MENU = {
     minMC: { label: 'Min Market Cap ($)', hint: 'e.g. 0 = no limit', min: 0, max: 10000000 },
     maxMC: { label: 'Max Market Cap ($)', hint: 'e.g. 500000', min: 0, max: 100000000 },
     minVolume: { label: 'Min Volume ($)', hint: 'e.g. 0 = no limit', min: 0, max: 1000000 },
-    minBuyRatio: { label: 'Min Buy/Sell Ratio', hint: 'e.g. 1.2', min: 0.5, max: 10 },
+    minBuyRatio: { label: 'Min Buy/Sell Ratio', hint: 'e.g. 1.2', min: 0, max: 10 },
     maxBundlerRate: { label: 'Max Bundler Rate (%)', hint: 'e.g. 30', min: 0, max: 100 },
     maxTop10HolderRate: { label: 'Max Top10 Holders (%)', hint: 'e.g. 95', min: 10, max: 100 },
     minHolder: { label: 'Min Holders', hint: 'e.g. 50', min: 0, max: 10000 },

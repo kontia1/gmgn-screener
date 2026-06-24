@@ -137,22 +137,23 @@ async function main() {
           const { score: earlyScore } = scoreToken(token, ageMin);
           token._score = earlyScore;
 
-          // Same filters as trending/trenches
-          if (ageMin < CONFIG.minAgeMin || ageMin > CONFIG.maxAgeMin) return;
-          if (mc < CONFIG.minMC || mc > CONFIG.maxMC) return;
+          // Same filters as trending/trenches (with debug logging)
+          const _sym = token.symbol || '?';
+          if (ageMin < CONFIG.minAgeMin || ageMin > CONFIG.maxAgeMin) { console.log(`[SIGNAL:FILTER] ${_sym} REJECTED: age=${ageMin.toFixed(0)}m (min=${CONFIG.minAgeMin} max=${CONFIG.maxAgeMin})`); return; }
+          if (mc < CONFIG.minMC || mc > CONFIG.maxMC) { console.log(`[SIGNAL:FILTER] ${_sym} REJECTED: mc=$${Math.round(mc)} (min=${CONFIG.minMC} max=${CONFIG.maxMC})`); return; }
           const vol = token.volume_24h || token.volume || 0;
-          if (vol < CONFIG.minVolume) return;
-          if (token.is_wash_trading) return;
+          if (vol < CONFIG.minVolume) { console.log(`[SIGNAL:FILTER] ${_sym} REJECTED: vol=$${Math.round(vol)} (min=${CONFIG.minVolume})`); return; }
+          if (token.is_wash_trading) { console.log(`[SIGNAL:FILTER] ${_sym} REJECTED: wash_trading`); return; }
           const bundler = token.bundler_rate || token.bundler_trader_amount_rate || 0;
-          if (bundler > CONFIG.maxBundlerRate) return;
+          if (bundler > CONFIG.maxBundlerRate) { console.log(`[SIGNAL:FILTER] ${_sym} REJECTED: bundler=${(bundler*100).toFixed(0)}% (max=${(CONFIG.maxBundlerRate*100).toFixed(0)}%)`); return; }
           const top10 = token.top_10_holder_rate || 0;
-          if (top10 > CONFIG.maxTop10HolderRate) return;
+          if (top10 > CONFIG.maxTop10HolderRate) { console.log(`[SIGNAL:FILTER] ${_sym} REJECTED: top10=${(top10*100).toFixed(0)}% (max=${(CONFIG.maxTop10HolderRate*100).toFixed(0)}%)`); return; }
 
           const { score: baseScore, reasons } = scoreToken(token, ageMin);
           const signalResult = applySignalAdjustment(token, baseScore, token._activeSignals || [], signalCfg);
-          if (signalResult.signalMeta.hardReject) return;
+          if (signalResult.signalMeta.hardReject) { console.log(`[SIGNAL:FILTER] ${_sym} REJECTED: hardReject`); return; }
           const cfg = getAutoConfig();
-          if (signalResult.displayScore < Math.max(35, cfg.minScore || 40)) return;
+          if (signalResult.displayScore < Math.max(35, cfg.minScore || 40)) { console.log(`[SIGNAL:FILTER] ${_sym} REJECTED: score=${signalResult.displayScore} < ${Math.max(35, cfg.minScore || 40)}`); return; }
 
           token._ageMin = ageMin;
           token._score = signalResult.displayScore;

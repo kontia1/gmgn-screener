@@ -213,6 +213,15 @@ async function fetchSignals() {
 /**
  * Parse signal token into screener-compatible format
  */
+// ─── Get Token Info (enrich volume from token info API) ───
+async function getTokenInfo(tokenAddress) {
+  try {
+    const cmd = `gmgn-cli token info --chain sol --address ${tokenAddress} --raw`;
+    const { stdout } = await execAsync(cmd, { encoding: 'utf8', timeout: 10000 });
+    return JSON.parse(stdout);
+  } catch { return null; }
+}
+
 function parseSignalToken(signal) {
   const d = signal.data || {};
   const signalType = signal.signal_type;
@@ -449,6 +458,28 @@ async function runSignalScan(processToken) {
         const ageSec = Math.round((Date.now() - globalEntry.firstSeen) / 1000);
         console.log(`[SIGNAL] ${token.symbol} skipped by global dedup (first: ${globalEntry.firstSource}, ${ageSec}s ago)`);
         continue;
+      }
+
+      // Enrich volume from token info API (signal API volume_24h = 0)
+      const info = await getTokenInfo(addr);
+      if (info) {
+        const priceData = info.price || {};
+        const poolData = info.pool || {};
+        const vol24h = parseFloat(priceData.volume_24h || 0);
+        if (vol24h > 0) {
+          token.volume_24h = vol24h;
+          token.volume = vol24h;
+          token.buys_24h = priceData.buys_24h || token.buys_24h;
+          token.sells_24h = priceData.sells_24h || token.sells_24h;
+          token.buys = token.buys_24h;
+          token.sells = token.sells_24h;
+          token.liquidity = parseFloat(poolData.liquidity || info.liquidity || token.liquidity || 0);
+          token.holder_count = info.holder_count || token.holder_count || 0;
+          token.hot_level = priceData.hot_level || token.hot_level || 0;
+          console.log(`[SIGNAL] ${token.symbol} enriched: vol=$${Math.round(vol24h)} liq=$${Math.round(token.liquidity)} holders=${token.holder_count}`);
+        } else {
+          console.log(`[SIGNAL] ${token.symbol} token info vol=0, using signal data`);
+        }
       }
 
       // Process token through shared pipeline
