@@ -38,6 +38,3 @@ test_*.js
 
 # Docs
 docs/
-
-# Kimchi scripts (contain hardcoded credentials)
-scripts/kimchi-*.mjs
