@@ -465,6 +465,9 @@ async function runSignalScan(processToken) {
       if (info) {
         const priceData = info.price || {};
         const poolData = info.pool || {};
+        const devData = info.dev || {};
+        const statData = info.stat || {};
+        const walletTags = info.wallet_tags_stat || {};
         const vol24h = parseFloat(priceData.volume_24h || 0);
         if (vol24h > 0) {
           token.volume_24h = vol24h;
@@ -476,10 +479,29 @@ async function runSignalScan(processToken) {
           token.liquidity = parseFloat(poolData.liquidity || info.liquidity || token.liquidity || 0);
           token.holder_count = info.holder_count || token.holder_count || 0;
           token.hot_level = priceData.hot_level || token.hot_level || 0;
-          console.log(`[SIGNAL] ${token.symbol} enriched: vol=$${Math.round(vol24h)} liq=$${Math.round(token.liquidity)} holders=${token.holder_count}`);
         } else {
           console.log(`[SIGNAL] ${token.symbol} token info vol=0, using signal data`);
         }
+        // Save nested objects for gmgnSnapshot
+        token._dev = devData;
+        token._pool = poolData;
+        token._stat = statData;
+        token._walletTags = walletTags;
+        // Enrich top-level fields from nested objects
+        token.sniper_count = token.sniper_count || statData.bot_degen_count || 0;
+        token.bot_degen_rate = statData.bot_degen_rate ?? token.bot_degen_rate ?? 0;
+        token.smart_degen_count = token.smart_degen_count || 0;
+        token.fresh_wallet_rate = statData.fresh_wallet_rate ?? 0;
+        token.creator_hold_rate = devData.creator_hold_rate ?? statData.creator_hold_rate ?? 0;
+        token.creator_open_count = devData.creator_open_count ?? 0;
+        token.twitter_create_token_count = devData.twitter_create_token_count ?? 0;
+        token.twitter_del_post_token_count = devData.twitter_del_post_token_count ?? 0;
+        token.dexscr_boost_fee = devData.dexscr_boost_fee ?? 0;
+        token.cto_flag = devData.cto_flag ?? 0;
+        token.image_dup_count = devData.image_dup_count ?? info.image_dup_count ?? 0;
+        token.initial_liquidity = poolData.initial_liquidity ? parseFloat(poolData.initial_liquidity) : 0;
+        token.exchange = poolData.exchange || '';
+        console.log(`[SIGNAL] ${token.symbol} enriched: vol=$${Math.round(token.volume_24h||0)} liq=$${Math.round(token.liquidity)} holders=${token.holder_count} creatorHold=${(token.creator_hold_rate*100).toFixed(1)}% fresh=${(token.fresh_wallet_rate*100).toFixed(1)}%`);
       }
 
       // Process token through shared pipeline
