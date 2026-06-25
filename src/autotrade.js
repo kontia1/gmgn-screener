@@ -552,7 +552,10 @@ async function autoBuy(tokenData) {
     console.error(`[AUTO] Buy failed: ${e.message}`);
     // Release the 30s pending buy lock immediately on failure so it doesn't block future attempts
     buyLocks.delete(mint);
-    await sendTelegram(`❌ Auto-Buy failed: ${symbol}\n${e.message}`);
+    // Don't notify user about untradeable tokens — not a bot bug
+    if (!e.message.includes('untradeable') && !e.message.includes('all routes')) {
+      await sendTelegram(`❌ Auto-Buy failed: ${symbol}\n${e.message}`);
+    }
   }
   return null;
 }
