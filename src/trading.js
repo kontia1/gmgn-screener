@@ -86,6 +86,124 @@ async function getSwapTx(quote, userPublicKey, priorityFeeLamports = 50000) {
   }
 }
 
+// ─── PumpPortal Trade-Local Fallback ─────────────────────────
+async function pumpPortalBuy(tokenMint, solAmount, slippageBps = 300) {
+  const keypair = getKeypair('default');
+  const conn = getConnection();
+
+  console.log(`[TRADE] PumpPortal buy ${tokenMint} with ${solAmount} SOL (pool: auto)`);
+
+  const resp = await fetch('https://pumpportal.fun/api/trade-local', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      publicKey: keypair.publicKey.toBase58(),
+      action: 'buy',
+      mint: tokenMint,
+      denominatedInSol: true,
+      amount: solAmount,
+      slippage: slippageBps / 100, // PumpPortal uses percent, not bps
+      priorityFee: 0.0005,
+      pool: 'auto', // routes to bonding curve OR PumpSwap AMM
+    }),
+  });
+
+  if (!resp.ok) {
+    const errText = await resp.text().catch(() => '');
+    throw new Error(`PumpPortal API error ${resp.status}: ${errText.slice(0, 100)}`);
+  }
+
+  const txBuf = Buffer.from(await resp.arrayBuffer());
+  const tx = VersionedTransaction.deserialize(txBuf);
+  tx.sign([keypair]);
+
+  const sig = await conn.sendTransaction(tx, {
+    skipPreflight: false,
+    maxRetries: 3,
+  });
+  console.log(`[TRADE] PumpPortal TX sent: ${sig}`);
+
+  // Confirm
+  const status = await Promise.race([
+    conn.confirmTransaction(sig, 'confirmed'),
+    new Promise((_, rej) =>
+      setTimeout(() => rej(new Error('confirmTransaction timeout (60s)')), 60_000)
+    )
+  ]);
+
+  const err = status?.err || status?.value?.err;
+  if (err) {
+    throw new Error(`PumpPortal TX failed on-chain: ${JSON.stringify(err)}`);
+  }
+
+  return {
+    success: true,
+    signature: sig,
+    inputAmount: solAmount,
+    outputAmount: '0', // PumpPortal doesn't return outAmount
+    decimals: 6,
+    source: 'pumpportal',
+  };
+}
+
+// ─── PumpPortal Sell Fallback ────────────────────────────────
+async function pumpPortalSell(tokenMint, tokenAmount, decimals, slippageBps = 300) {
+  const keypair = getKeypair('default');
+  const conn = getConnection();
+
+  console.log(`[TRADE] PumpPortal sell ${tokenAmount} of ${tokenMint} (pool: auto)`);
+
+  const resp = await fetch('https://pumpportal.fun/api/trade-local', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      publicKey: keypair.publicKey.toBase58(),
+      action: 'sell',
+      mint: tokenMint,
+      denominatedInSol: false,
+      amount: tokenAmount,
+      slippage: slippageBps / 100,
+      priorityFee: 0.0005,
+      pool: 'auto',
+    }),
+  });
+
+  if (!resp.ok) {
+    const errText = await resp.text().catch(() => '');
+    throw new Error(`PumpPortal sell API error ${resp.status}: ${errText.slice(0, 100)}`);
+  }
+
+  const txBuf = Buffer.from(await resp.arrayBuffer());
+  const tx = VersionedTransaction.deserialize(txBuf);
+  tx.sign([keypair]);
+
+  const sig = await conn.sendTransaction(tx, {
+    skipPreflight: false,
+    maxRetries: 3,
+  });
+  console.log(`[TRADE] PumpPortal sell TX sent: ${sig}`);
+
+  const status = await Promise.race([
+    conn.confirmTransaction(sig, 'confirmed'),
+    new Promise((_, rej) =>
+      setTimeout(() => rej(new Error('confirmTransaction timeout (60s)')), 60_000)
+    )
+  ]);
+
+  const err = status?.err || status?.value?.err;
+  if (err) {
+    throw new Error(`PumpPortal sell TX failed: ${JSON.stringify(err)}`);
+  }
+
+  return {
+    success: true,
+    signature: sig,
+    inputAmount: tokenAmount,
+    outputSol: 0,
+    source: 'pumpportal',
+  };
+}
+
 // ─── Buy Token (SOL → Token) ───────────────────────────
 async function buyToken(tokenMint, solAmount, walletLabel = 'default', slippageBps = 300, { _isRetry = false } = {}) {
   try {
@@ -98,8 +216,13 @@ async function buyToken(tokenMint, solAmount, walletLabel = 'default', slippageB
       const { pumpFunBuy, isOnBondingCurve } = require('./pumpfun');
       const onCurve = await isOnBondingCurve(tokenMint);
       if (!onCurve) {
-        console.log(`[TRADE] Token not on bonding curve (migrated to AMM), cannot fallback`);
-        throw jupErr;
+        console.log(`[TRADE] Token not on bonding curve (migrated to AMM), trying PumpPortal Trade-Local...`);
+        try {
+          return await pumpPortalBuy(tokenMint, solAmount, slippageBps);
+        } catch (ppErr) {
+          console.log(`[TRADE] PumpPortal also failed: ${ppErr.message}`);
+          throw jupErr; // original error
+        }
       }
       return await pumpFunBuy(tokenMint, solAmount, slippageBps);
     }
@@ -258,10 +381,20 @@ async function sellToken(tokenMint, tokenAmount, decimals, walletLabel = 'defaul
   tx.sign([keypair]);
 
   // Send
-  const sig = await conn.sendTransaction(tx, {
-    skipPreflight: true,
-    maxRetries: 3,
-  });
+  let sig;
+  try {
+    sig = await conn.sendTransaction(tx, {
+      skipPreflight: false,
+      maxRetries: 3,
+    });
+  } catch (sellErr) {
+    const errStr = sellErr.message || '';
+    if (errStr.includes('pAMM') || errStr.includes('account required')) {
+      console.log(`[TRADE] Sell failed (pAMM broken), trying PumpPortal...`);
+      return await pumpPortalSell(tokenMint, tokenAmount, decimals, slippageBps);
+    }
+    throw sellErr;
+  }
   console.log(`[TRADE] TX sent: ${sig}`);
 
   // Confirm — FIX 3: 60s timeout to prevent hanging on dead WebSocket

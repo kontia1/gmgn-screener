@@ -1914,13 +1914,12 @@ async function handleSellButton(chatId, mintPrefix, pct) {
       });
     } else {
       dryRun.recordDryPartialSell(pos.tokenMint, tokensToSell, virtualSol, `button_${pct}pct`);
-      // TRAILING TP FIX: Reset peak reference to remaining-only values after partial sell
+      // TRAILING TP FIX: Keep peakPrice at ATH (don't reset to current price)
       const dryBtnPrice = tokensToSell > 0 ? virtualSol / tokensToSell : 0;
       const dryBtnPos = dryRun.getDryPosition(pos.tokenMint);
       if (dryBtnPos && dryBtnPrice > 0) {
         const dryBtnRemainingPnlPct = ((dryBtnPrice / dryBtnPos.entryPrice) - 1) * 100;
         dryRun.updateDryPosition(pos.tokenMint, {
-          peakPrice: dryBtnPrice,
           peakPnlPct: parseFloat(dryBtnRemainingPnlPct.toFixed(1)),
           _partialSellReset: true,
         });
@@ -1937,6 +1936,9 @@ async function handleSellButton(chatId, mintPrefix, pct) {
   try {
     await tgApi('sendMessage', { chat_id: chatId, text: `⏳ Selling ${pct}% of ${pos.symbol}...`, parse_mode: 'HTML' });
 
+    // Track manual sell initiation — prevents wallet_empty race condition
+    if (!isDryMode) positions.updatePosition(pos.tokenMint, { _manualSellAt: Date.now() });
+
     const bal = await wallet.getTokenBalance(pos.tokenMint);
     if (bal.amount <= 0) throw new Error('No tokens found');
 
@@ -1949,13 +1951,12 @@ async function handleSellButton(chatId, mintPrefix, pct) {
         require('./autotrade').setPostCloseLock(pos.tokenMint);
       } else {
         positions.recordPartialSell(pos.tokenMint, sellAmount, result.outputSol, result.signature, `button_${pct}pct`);
-        // TRAILING TP FIX: Reset peak reference to remaining-only values after partial sell
+        // TRAILING TP FIX: Keep peakPrice at ATH (don't reset to current price)
         const btnPrice = sellAmount > 0 ? result.outputSol / sellAmount : 0;
         const btnPos = positions.getPosition(pos.tokenMint);
         if (btnPos && btnPrice > 0) {
           const btnRemainingPnlPct = ((btnPrice / btnPos.entryPrice) - 1) * 100;
           positions.updatePosition(pos.tokenMint, {
-            peakPrice: btnPrice,
             peakPnlPct: parseFloat(btnRemainingPnlPct.toFixed(1)),
             _partialSellReset: true,
           });

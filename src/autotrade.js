@@ -555,16 +555,14 @@ async function executePartialSell(pos, partial, currentPrice) {
       dryRun.updateDryPosition(freshPos.tokenMint, { partialSells: updatedPartials });
     }
 
-    // TRAILING TP FIX: Reset peak reference to remaining-only values after partial sell
-    // Previously peakPnlPct included totalSolReceived (realized gains), inflating the peak.
-    // Now we reset to per-token PNL so trailing TP tracks only the remaining tokens' price action.
+    // TRAILING TP FIX: Keep peakPrice at ATH (don't reset to current price)
+    // Only update peakPnlPct to remaining-only PNL for display
     const dryRemainingPnlPct = ((currentPrice / freshPos.entryPrice) - 1) * 100;
     dryRun.updateDryPosition(freshPos.tokenMint, {
-      peakPrice: currentPrice,
       peakPnlPct: parseFloat(dryRemainingPnlPct.toFixed(1)),
       _partialSellReset: true,
     });
-    console.log(`[AUTO] ${freshPos.symbol}: Trailing TP peak reset after partial sell (remaining-only PNL: ${dryRemainingPnlPct.toFixed(1)}%)`);
+    console.log(`[AUTO] ${freshPos.symbol}: Dry partial sell complete (remaining-only PNL: ${dryRemainingPnlPct.toFixed(1)}%, peakPrice kept at ATH)`);
 
     const updatedPos = dryRun.getDryPosition(freshPos.tokenMint) || newPos || freshPos;
     const pnl = dryRun.calcDryPnl(updatedPos, currentPrice);
@@ -594,16 +592,14 @@ async function executePartialSell(pos, partial, currentPrice) {
         positions.updatePosition(freshPos.tokenMint, { partialSells: updatedPartials });
       }
 
-      // TRAILING TP FIX: Reset peak reference to remaining-only values after partial sell
-      // Previously peakPnlPct included totalSolReceived (realized gains), inflating the peak.
-      // Now we reset to per-token PNL so trailing TP tracks only the remaining tokens' price action.
+      // TRAILING TP FIX: Keep peakPrice at ATH (don't reset to current price)
+      // Only update peakPnlPct to remaining-only PNL for display
       const liveRemainingPnlPct = ((currentPrice / freshPos.entryPrice) - 1) * 100;
       positions.updatePosition(freshPos.tokenMint, {
-        peakPrice: currentPrice,
         peakPnlPct: parseFloat(liveRemainingPnlPct.toFixed(1)),
         _partialSellReset: true,
       });
-      console.log(`[AUTO] ${freshPos.symbol}: Trailing TP peak reset after partial sell (remaining-only PNL: ${liveRemainingPnlPct.toFixed(1)}%)`);
+      console.log(`[AUTO] ${freshPos.symbol}: Partial sell complete (remaining-only PNL: ${liveRemainingPnlPct.toFixed(1)}%, peakPrice kept at ATH)`);
 
       const updatedPos = positions.getPosition(freshPos.tokenMint) || newPos || freshPos;
       const pnl = calcPnl(updatedPos, currentPrice);
@@ -1137,18 +1133,23 @@ async function checkPositions() {
         const { getTokenBalance } = require('./wallet');
         const walletBal = await getTokenBalance(pos.tokenMint);
         if (walletBal.amount <= 0) {
-          const { closePosition } = require('./positions');
-          const pnl = (pos.totalSolReceived || 0) - (pos.solSpent || 0);
-          closePosition(pos.tokenMint, 0, 'none', 'wallet_empty');
-          setPostCloseLock(pos.tokenMint);
-          console.log(`[AUTO] 🧹 ${pos.symbol}: wallet empty, auto-closed (PNL: ${pnl.toFixed(4)} SOL)`);
-          sendTelegram(
-            `🧹 <b>Auto-Closed: ${pos.symbol}</b>\n\n` +
-            `📊 Reason: Wallet balance = 0 (tokens already sold)\n` +
-            `💰 PNL: ${pnl >= 0 ? '+' : ''}${pnl.toFixed(4)} SOL`,
-            { parse_mode: 'HTML' }
-          ).catch(() => {});
-          continue;
+          // Grace period: skip auto-close if manual sell was initiated recently (< 30s)
+          if (pos._manualSellAt && (Date.now() - pos._manualSellAt) < 30000) {
+            console.log(`[AUTO] ${pos.symbol}: wallet empty but manual sell pending, skipping`);
+          } else {
+            const { closePosition } = require('./positions');
+            const pnl = (pos.totalSolReceived || 0) - (pos.solSpent || 0);
+            closePosition(pos.tokenMint, 0, 'none', 'wallet_empty');
+            setPostCloseLock(pos.tokenMint);
+            console.log(`[AUTO] 🧹 ${pos.symbol}: wallet empty, auto-closed (PNL: ${pnl.toFixed(4)} SOL)`);
+            sendTelegram(
+              `🧹 <b>Auto-Closed: ${pos.symbol}</b>\n\n` +
+              `📊 Reason: Wallet balance = 0 (tokens already sold)\n` +
+              `💰 PNL: ${pnl >= 0 ? '+' : ''}${pnl.toFixed(4)} SOL`,
+              { parse_mode: 'HTML' }
+            ).catch(() => {});
+            continue;
+          }
         }
       }
       // Use Jupiter quote for accurate PNL (GMGN price is USD and unreliable for new tokens)
@@ -1598,17 +1599,23 @@ async function processUnifiedPosition(pos, isDryMode) {
     try {
       const walletBal = await getTokenBalance(pos.tokenMint);
       if (walletBal.amount <= 0) {
-        const pnl = (pos.totalSolReceived || 0) - (pos.solSpent || 0);
-        closePosition(pos.tokenMint, 0, 'none', 'wallet_empty');
-        setPostCloseLock(pos.tokenMint);
-        console.log(`[UNIFIED] ${pos.symbol}: wallet empty, auto-closed (PNL: ${pnl.toFixed(4)} SOL)`);
-        sendTelegram(
-          `🧹 <b>Auto-Closed: ${pos.symbol}</b>\n\n` +
-          `📊 Wallet balance = 0\n` +
-          `💰 PNL: ${pnl >= 0 ? '+' : ''}${pnl.toFixed(4)} SOL`,
-          { parse_mode: 'HTML' }
-        ).catch(() => {});
-        return;
+        // Grace period: skip auto-close if manual sell was initiated recently (< 30s)
+        // Prevents wallet_empty race condition when user clicks sell button
+        if (pos._manualSellAt && (Date.now() - pos._manualSellAt) < 30000) {
+          console.log(`[UNIFIED] ${pos.symbol}: wallet empty but manual sell pending (${((Date.now() - pos._manualSellAt) / 1000).toFixed(0)}s ago), skipping auto-close`);
+        } else {
+          const pnl = (pos.totalSolReceived || 0) - (pos.solSpent || 0);
+          closePosition(pos.tokenMint, 0, 'none', 'wallet_empty');
+          setPostCloseLock(pos.tokenMint);
+          console.log(`[UNIFIED] ${pos.symbol}: wallet empty, auto-closed (PNL: ${pnl.toFixed(4)} SOL)`);
+          sendTelegram(
+            `🧹 <b>Auto-Closed: ${pos.symbol}</b>\n\n` +
+            `📊 Wallet balance = 0\n` +
+            `💰 PNL: ${pnl >= 0 ? '+' : ''}${pnl.toFixed(4)} SOL`,
+            { parse_mode: 'HTML' }
+          ).catch(() => {});
+          return;
+        }
       }
     } catch (_) {}
   }
@@ -1823,6 +1830,9 @@ async function processUnifiedPosition(pos, isDryMode) {
   const pnlSol = totalValueSol - pos.solSpent;
   const pnlPct = pos.solSpent > 0 ? (pnlSol / pos.solSpent * 100) : 0;
   const currentPrice = pos.remainingTokens > 0 ? currentValueSol / pos.remainingTokens : 0;
+  // Remaining-only PNL: based on current price vs entry, ignores partial proceeds
+  // Used for hard SL check so partial sells don't buffer the stop-loss threshold
+  const remainingPnlPct = pos.entryPrice > 0 ? ((currentPrice / pos.entryPrice) - 1) * 100 : pnlPct;
 
   updatePosField(pos, isDryMode, { lastRugCheck: checkNow });
 
@@ -1843,9 +1853,9 @@ async function processUnifiedPosition(pos, isDryMode) {
   // ─── STEP 5: Collect actions (PRIORITY ORDER) ───
   const actions = [];
 
-  // P1: Hard SL (instant, no consecutive confirm)
-  if (pnlPct <= -hardSlPct) {
-    actions.push({ type: 'hard_sl', pnlPct, priority: 0 });
+  // P1: Hard SL (instant, no consecutive confirm) — priority 1 (trailing is 0)
+  if (remainingPnlPct <= -hardSlPct) {
+    actions.push({ type: 'hard_sl', pnlPct, priority: 1 });
   }
 
   // P2: Rug signals (from Step 2)
@@ -1908,7 +1918,7 @@ async function processUnifiedPosition(pos, isDryMode) {
     const peakPnl = pos.peakPnlPct || 0;
     const triggerPct = autoConfig.trailingTriggerPct || pos.trailingTriggerPct || 20;
     if (peakPnl > triggerPct && dropFromPeak >= (pos.trailingDropPct || 15)) {
-      actions.push({ type: 'trailing', dropFromPeak: dropFromPeak.toFixed(1), peakPnl, priority: 3 });
+      actions.push({ type: 'trailing', dropFromPeak: dropFromPeak.toFixed(1), peakPnl, priority: 0 });
     }
   }
 
