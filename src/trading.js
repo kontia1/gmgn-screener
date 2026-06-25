@@ -211,7 +211,7 @@ async function buyToken(tokenMint, solAmount, walletLabel = 'default', slippageB
   } catch (jupErr) {
     const msg = jupErr.message || '';
     // If pAMM broken → fallback to PumpFun bonding curve
-    if (msg.includes('untradeable') || msg.includes('pAMM') || msg.includes('only route')) {
+    if (msg.includes('untradeable') || msg.includes('pAMM') || msg.includes('only route') || msg.includes('all routes')) {
       console.log(`[TRADE] Jupiter failed (${msg.slice(0,80)}), falling back to PumpFun bonding curve...`);
       const { pumpFunBuy, isOnBondingCurve } = require('./pumpfun');
       const onCurve = await isOnBondingCurve(tokenMint);
@@ -299,13 +299,23 @@ async function _jupiterBuy(tokenMint, solAmount, walletLabel, slippageBps, _isRe
     // Check if fresh quote still routes through broken pAMM
     const freshRouteLabels = (freshQuote.routePlan || []).map(r => (r?.swapInfo?.label || '').toLowerCase()).join(' ');
     if (excludedDexes.length && freshRouteLabels.includes('pump')) {
-      // Try PumpPortal before giving up — it can route to ANY available pool
-      console.log(`[TRADE] Still routing through pAMM after excludeDexes, trying PumpPortal...`);
+      // Different Pump.fun program — try it, might work (pAMMBay6 != Pump.fun Amm)
+      console.log(`[TRADE] Fresh route uses ${freshQuote.routePlan?.[0]?.swapInfo?.label || 'pump'}, trying swap...`);
+      const freshSwapResult = await getSwapTx(freshQuote, keypair.publicKey);
+      const freshTxBuf = Buffer.from(freshSwapResult.swapTransaction, 'base64');
+      const freshTx = VersionedTransaction.deserialize(freshTxBuf);
+      freshTx.sign([keypair]);
       try {
-        return await pumpPortalBuy(tokenMint, solAmount, slippageBps);
-      } catch (ppErr) {
-        console.log(`[TRADE] PumpPortal also failed: ${ppErr.message}`);
-        throw new Error('Token untradeable — only route is broken pAMM pool');
+        sig = await conn.sendTransaction(freshTx, { skipPreflight: false, maxRetries: 3 });
+      } catch (freshErr) {
+        // This route also failed — try PumpPortal as last resort
+        console.log(`[TRADE] Fresh route also failed: ${freshErr.message?.slice(0,80)}, trying PumpPortal...`);
+        try {
+          return await pumpPortalBuy(tokenMint, solAmount, slippageBps);
+        } catch (ppErr) {
+          console.log(`[TRADE] PumpPortal also failed: ${ppErr.message}`);
+          throw new Error('Token untradeable — all routes failed');
+        }
       }
     }
 
