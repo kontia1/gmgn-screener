@@ -365,6 +365,8 @@ async function autoBuy(tokenData) {
         snapshotAt: Date.now(),
         source: tokenData._source || 'unknown',
         ageMin: tokenData._ageMin || 0,
+        sniper: tokenData.sniper_count || 0,
+        botDegenRate: tokenData.bot_degen_rate || 0,
       },
     });
 
@@ -481,6 +483,8 @@ async function autoBuy(tokenData) {
           snapshotAt: Date.now(),
           source: tokenData._source || 'unknown',
           ageMin: tokenData._ageMin || 0,
+          sniper: tokenData.sniper_count || 0,
+          botDegenRate: tokenData.bot_degen_rate || 0,
         },
       });
 
