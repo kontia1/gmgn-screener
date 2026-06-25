@@ -1504,8 +1504,8 @@ async function cfgFilterAgeMenu(chatId) {
   const f = cfg.customFilters || {};
 
   const buttons = [
-    [{ text: `⏳ Min: ${f.minAgeMin || 15}m`, callback_data: 'cfg_filter_minAgeMin' },
-     { text: `⏳ Max: ${f.maxAgeMin || 120}m`, callback_data: 'cfg_filter_maxAgeMin' }],
+    [{ text: `⏳ Min: ${f.minAgeMin ?? 15}m`, callback_data: 'cfg_filter_minAgeMin' },
+     { text: `⏳ Max: ${f.maxAgeMin ?? 120}m`, callback_data: 'cfg_filter_maxAgeMin' }],
     [{ text: '🔙 Back', callback_data: 'menu_config' }],
   ];
 
@@ -1542,14 +1542,14 @@ async function cfgFilterSniperMenu(chatId) {
   const f = cfg.customFilters || {};
 
   const buttons = [
-    [{ text: `🎯 Min: ${f.minSniper || 3}`, callback_data: 'cfg_filter_minSniper' },
-     { text: `🎯 Max: ${f.maxSniper || 50}`, callback_data: 'cfg_filter_maxSniper' }],
+    [{ text: `🎯 Min: ${f.minSniper ?? 3}`, callback_data: 'cfg_filter_minSniper' },
+     { text: `🎯 Max: ${f.maxSniper ?? 50}`, callback_data: 'cfg_filter_maxSniper' }],
     [{ text: '🔙 Back', callback_data: 'menu_config' }],
   ];
 
   await tgApi('sendMessage', {
     chat_id: chatId,
-    text: `✏️ <b>Sniper Count Filter</b>\n\nMin: ${f.minSniper || 3}\nMax: ${f.maxSniper || 50}\n\nTap to edit:`,
+    text: `✏️ <b>Sniper Count Filter</b>\n\nMin: ${f.minSniper ?? 3}\nMax: ${f.maxSniper ?? 50}\n\nTap to edit:`,
     parse_mode: 'HTML',
     reply_markup: { inline_keyboard: buttons },
   });
