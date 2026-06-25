@@ -1024,7 +1024,7 @@ async function checkRugSignals(pos, cachedGmgnData, cachedLastQuoteSol) {
     const smoothedScore = Math.round(pos._emaRugScore);
     const smoothedLevel = smoothedScore >= 75 ? 'exit' : smoothedScore >= 50 ? 'partial' : smoothedScore >= 30 ? 'warn' : smoothedScore > 0 ? 'watch' : 'safe';
 
-    return { isRug: smoothedScore >= 30, signals, rugScore: smoothedScore, rawRugScore: rugScore, rugLevel: smoothedLevel };
+    return { isRug: smoothedScore >= 30, signals, rugScore: smoothedScore, rawRugScore: rugScore, rugLevel: smoothedLevel, lpRemoved: rugScore >= 100 };
 
   } catch (e) {
     // API error — retry 2x before giving up (faster retries with direct API)
@@ -1858,22 +1858,29 @@ async function processUnifiedPosition(pos, isDryMode) {
     actions.push({ type: 'hard_sl', pnlPct, priority: 1 });
   }
 
-  // P2: Rug signals (from Step 2)
+  // P0: Rug signals (from Step 2) — HIGHER priority than hard_sl
   const rugLevel = rugResult.rugLevel || 'safe';
   const rugScore = rugResult.rugScore || 0;
 
   if (rugLevel === 'exit' && rugScore >= 75) {
-    // Consecutive confirmation for rug exit (12s window)
-    const rugConfLevel = pos._rugConfLevel || '';
-    const rugConfTs = pos._rugConfTs || 0;
-    const rugConfCount = pos._rugConfCount || 0;
-    const confAge = Date.now() - rugConfTs;
-    if (rugConfLevel !== 'exit' || confAge > 12000) {
-      updatePosField(pos, isDryMode, { _rugConfLevel: 'exit', _rugConfTs: Date.now(), _rugConfCount: 1 });
-      console.log(`[UNIFIED] ${pos.symbol}: rug exit (score ${rugScore}) — confirming...`);
+    // Instant exit for high-confidence rug (score 80+ or LP=0)
+    const isHighConf = rugScore >= 80 || rugResult.lpRemoved;
+    if (isHighConf) {
+      console.log(`[UNIFIED] ${pos.symbol}: HIGH-CONF RUG (score ${rugScore}, lpRemoved=${!!rugResult.lpRemoved}) — instant exit`);
+      actions.push({ type: 'rug_exit', rugResult, priority: 0 });
     } else {
-      updatePosField(pos, isDryMode, { _rugConfCount: 2 });
-      actions.push({ type: 'rug_exit', rugResult, priority: 1 });
+      // Consecutive confirmation for medium-confidence rug (12s window)
+      const rugConfLevel = pos._rugConfLevel || '';
+      const rugConfTs = pos._rugConfTs || 0;
+      const rugConfCount = pos._rugConfCount || 0;
+      const confAge = Date.now() - rugConfTs;
+      if (rugConfLevel !== 'exit' || confAge > 12000) {
+        updatePosField(pos, isDryMode, { _rugConfLevel: 'exit', _rugConfTs: Date.now(), _rugConfCount: 1 });
+        console.log(`[UNIFIED] ${pos.symbol}: rug exit (score ${rugScore}) — confirming...`);
+      } else {
+        updatePosField(pos, isDryMode, { _rugConfCount: 2 });
+        actions.push({ type: 'rug_exit', rugResult, priority: 0 });
+      }
     }
   } else if (rugLevel === 'partial' && rugScore >= 50 && !pos._rugPartialSold) {
     // Consecutive confirmation with 12s window

@@ -299,7 +299,14 @@ async function _jupiterBuy(tokenMint, solAmount, walletLabel, slippageBps, _isRe
     // Check if fresh quote still routes through broken pAMM
     const freshRouteLabels = (freshQuote.routePlan || []).map(r => (r?.swapInfo?.label || '').toLowerCase()).join(' ');
     if (excludedDexes.length && freshRouteLabels.includes('pump')) {
-      throw new Error('Token untradeable — only route is broken pAMM pool');
+      // Try PumpPortal before giving up — it can route to ANY available pool
+      console.log(`[TRADE] Still routing through pAMM after excludeDexes, trying PumpPortal...`);
+      try {
+        return await pumpPortalBuy(tokenMint, solAmount, slippageBps);
+      } catch (ppErr) {
+        console.log(`[TRADE] PumpPortal also failed: ${ppErr.message}`);
+        throw new Error('Token untradeable — only route is broken pAMM pool');
+      }
     }
 
     const freshImpact = parseFloat(freshQuote.priceImpactPct || '0');
