@@ -187,6 +187,7 @@ async function enrichToken(token) {
     token.volume_24h = parseFloat(price.volume_24h) || token.volume || 0;
     token.liquidity = parseFloat(pool.liquidity) || token.liquidity || 0;
     token.holder_count = price.holder_count || token.holder_count || 0;
+    token.exchange = pool.exchange || token.exchange || '';  // update exchange from token info (most reliable)
     token.top_10_holder_rate = stat.top_10_holder_rate || token.top_10_holder_rate || 0;
     token.bundler_rate = stat.bundler_trader_amount_rate || token.bundler_rate || 0;
     token.entrapment_ratio = stat.top_entrapment_trader_percentage || token.entrapment_ratio || 0;
@@ -227,7 +228,20 @@ function detectMigrations(currentTokens, config) {
 
     // Compare with previous snapshot
     const prev = previousSnapshot.get(addr);
-    if (!prev) continue;
+    if (!prev) {
+      // Token is NEW in snapshot. If already on external exchange, treat as migration event
+      // (migrated before we first saw it — common for meteora/raydium migrations)
+      if (currentExchange && !BONDING_EXCHANGES.includes(currentExchange) && !['pump_amm'].includes(currentExchange)) {
+        events.push({
+          ...token,
+          migrationEvent: true,
+          fromExchange: 'unknown',
+          toExchange: currentExchange,
+          _detectionMethod: 'new_external',
+        });
+      }
+      continue;
+    }
 
     const prevMpe = prev.migrated_pool_exchange || '';
     const prevExchange = prev.exchange || '';
