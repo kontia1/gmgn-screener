@@ -102,16 +102,17 @@ async function pumpSdkBuy(tokenMint, solAmount, slippageBps = 300) {
 
   console.log(`[TRADE] PumpSDK buy ${tokenMint} with ${solAmount} SOL`);
 
-  // Try bonding curve (retry once for RPC lag)
+  // Try bonding curve (retry for RPC lag on new tokens)
   let buyState = null;
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 0; attempt < 3; attempt++) {
     try {
       buyState = await online.fetchBuyState(mint, keypair.publicKey);
       break;
     } catch (e) {
-      if (e.message?.includes('Bonding curve account not found') && attempt === 0) {
-        console.log(`[TRADE] Bonding curve not found, retrying in 2s (RPC lag)...`);
-        await new Promise(r => setTimeout(r, 2000));
+      if (e.message?.includes('Bonding curve account not found') && attempt < 2) {
+        const wait = (attempt + 1) * 3;
+        console.log(`[TRADE] Bonding curve not found, retrying in ${wait}s (RPC lag, attempt ${attempt + 1}/3)...`);
+        await new Promise(r => setTimeout(r, wait * 1000));
         continue;
       }
       if (e.message?.includes('Bonding curve account not found')) {
@@ -165,16 +166,17 @@ async function pumpSdkSell(tokenMint, tokenAmount, decimals, slippageBps = 300) 
 
   console.log(`[TRADE] PumpSDK sell ${tokenAmount} of ${tokenMint}`);
 
-  // Try bonding curve (retry once for RPC lag)
+  // Try bonding curve (retry for RPC lag on new tokens)
   let sellState = null;
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 0; attempt < 3; attempt++) {
     try {
       sellState = await online.fetchSellState(mint, keypair.publicKey);
       break;
     } catch (e) {
-      if (e.message?.includes('Bonding curve account not found') && attempt === 0) {
-        console.log(`[TRADE] Bonding curve not found, retrying in 2s (RPC lag)...`);
-        await new Promise(r => setTimeout(r, 2000));
+      if (e.message?.includes('Bonding curve account not found') && attempt < 2) {
+        const wait = (attempt + 1) * 3;
+        console.log(`[TRADE] Bonding curve not found, retrying in ${wait}s (RPC lag, attempt ${attempt + 1}/3)...`);
+        await new Promise(r => setTimeout(r, wait * 1000));
         continue;
       }
       if (e.message?.includes('Bonding curve account not found')) {
