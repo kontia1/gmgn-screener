@@ -13,6 +13,44 @@ const JUPITER_API = process.env.JUPITER_API_URL || 'https://api.jup.ag/swap/v1';
 const JUPITER_KEY = process.env.JUPITER_API_KEY || '';
 const SOL_MINT = 'So11111111111111111111111111111111111111112';
 const PUMP_AMM_PROGRAM = 'pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA';
+const GMGN_API_KEY = process.env.GMGN_API_KEY || '';
+
+// Find PumpSwap AMM pool — tries canonical PDA, then falls back to GMGN pool data
+async function findPumpSwapPool(conn, mint) {
+  // 1. Try canonical PDA
+  const pda = canonicalPumpPoolPda(mint);
+  const info = await conn.getAccountInfo(pda);
+  if (info && info.owner.toBase58() === PUMP_AMM_PROGRAM) {
+    return { poolKey: pda, source: 'pda' };
+  }
+
+  // 2. Fallback: fetch pool address from GMGN token info API
+  try {
+    const ts = Math.floor(Date.now() / 1000);
+    const clientId = 'gmgn-' + ts;
+    const url = `https://openapi.gmgn.ai/v1/token/info?chain=sol&address=${mint.toBase58()}&timestamp=${ts}&client_id=${clientId}`;
+    const resp = await fetch(url, {
+      headers: { 'X-APIKEY': GMGN_API_KEY },
+      signal: AbortSignal.timeout(8000)
+    });
+    if (resp.ok) {
+      const data = await resp.json();
+      const poolAddr = data?.data?.pool?.pool_address;
+      if (poolAddr) {
+        const pk = new PublicKey(poolAddr);
+        const poolInfo = await conn.getAccountInfo(pk);
+        if (poolInfo && poolInfo.owner.toBase58() === PUMP_AMM_PROGRAM) {
+          console.log(`[TRADE] Pool found via GMGN: ${poolAddr} (PDA was ${pda.toBase58()})`);
+          return { poolKey: pk, source: 'gmgn' };
+        }
+      }
+    }
+  } catch (e) {
+    console.log(`[TRADE] GMGN pool lookup failed: ${e.message}`);
+  }
+
+  return null;
+}
 
 // Build headers with API key if available
 function jupHeaders(extra = {}) {
@@ -226,15 +264,14 @@ async function pumpSwapBuy(tokenMint, solAmount, slippageBps = 300) {
   const conn = getConnection();
   const mint = new PublicKey(tokenMint);
 
-  // Find pool — try canonical PDA first, then search
-  let poolKey = canonicalPumpPoolPda(mint);
-  let info = await conn.getAccountInfo(poolKey);
-  if (!info || info.owner.toBase58() !== PUMP_AMM_PROGRAM) {
-    // Non-canonical pool — need to find via getProgramAccounts or fail
-    const ownerInfo = info ? info.owner.toBase58() : 'null (account not found)';
-    const lamports = info ? info.lamports : 0;
-    throw new Error(`PumpSwap AMM pool not found | pool=${poolKey.toBase58()} owner=${ownerInfo} lamports=${lamports}`);
+  // Find pool — try canonical PDA first, then GMGN fallback
+  const poolResult = await findPumpSwapPool(conn, mint);
+  if (!poolResult) {
+    const pda = canonicalPumpPoolPda(mint);
+    const ownerInfo = 'pool not found (PDA + GMGN both failed)';
+    throw new Error(`PumpSwap AMM pool not found | pool=${pda.toBase58()} owner=${ownerInfo}`);
   }
+  const poolKey = poolResult.poolKey;
 
   const ammOnline = new OnlinePumpAmmSdk(conn);
   const ammOffline = PUMP_AMM_SDK;
@@ -243,7 +280,7 @@ async function pumpSwapBuy(tokenMint, solAmount, slippageBps = 300) {
   const slippage = slippageBps / 10000;
 
   const ixs = await ammOffline.sellBaseInput(swapState, solLamports, slippage);
-  console.log(`[TRADE] PumpSwap AMM buy: ${ixs.length} instructions`);
+  console.log(`[TRADE] PumpSwap AMM buy: ${ixs.length} instructions (pool via ${poolResult.source})`);
 
   return await _sendIxs(conn, keypair, ixs, 'pump-amm');
 }
@@ -254,13 +291,13 @@ async function pumpSwapSell(tokenMint, tokenAmount, decimals, slippageBps = 300)
   const conn = getConnection();
   const mint = new PublicKey(tokenMint);
 
-  let poolKey = canonicalPumpPoolPda(mint);
-  let info = await conn.getAccountInfo(poolKey);
-  if (!info || info.owner.toBase58() !== PUMP_AMM_PROGRAM) {
-    const ownerInfo = info ? info.owner.toBase58() : 'null (account not found)';
-    const lamports = info ? info.lamports : 0;
-    throw new Error(`PumpSwap AMM pool not found | pool=${poolKey.toBase58()} owner=${ownerInfo} lamports=${lamports}`);
+  const poolResult = await findPumpSwapPool(conn, mint);
+  if (!poolResult) {
+    const pda = canonicalPumpPoolPda(mint);
+    const ownerInfo = 'pool not found (PDA + GMGN both failed)';
+    throw new Error(`PumpSwap AMM pool not found | pool=${pda.toBase58()} owner=${ownerInfo}`);
   }
+  const poolKey = poolResult.poolKey;
 
   const ammOnline = new OnlinePumpAmmSdk(conn);
   const ammOffline = PUMP_AMM_SDK;
@@ -269,7 +306,7 @@ async function pumpSwapSell(tokenMint, tokenAmount, decimals, slippageBps = 300)
   const slippage = slippageBps / 10000;
 
   const ixs = await ammOffline.sellQuoteInput(swapState, rawAmount, slippage);
-  console.log(`[TRADE] PumpSwap AMM sell: ${ixs.length} instructions`);
+  console.log(`[TRADE] PumpSwap AMM sell: ${ixs.length} instructions (pool via ${poolResult.source})`);
 
   return await _sendIxs(conn, keypair, ixs, 'pump-amm');
 }
