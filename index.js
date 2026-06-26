@@ -217,20 +217,34 @@ async function main() {
   // ─── SmartMoney + KOL Tracker Processor ────────────────
   function trackerProcessToken(token, source) {
     const cfg = getAutoConfig();
-    const filters = getActiveFilters();
+    const globalFilters = getActiveFilters();
+    // Migration source uses its own filters, not global custom filters
+    const filters = source === 'migration' ? {
+      minAgeMin: 0,
+      maxAgeMin: cfg.migrationTracker?.maxAgeMin || 999999,
+      minMC: cfg.migrationTracker?.mcMin || 5000,
+      maxMC: cfg.migrationTracker?.mcMax || 200000,
+      minVolume: 0,
+      maxBundlerRate: cfg.migrationTracker?.maxBundlerRate || 0.30,
+      maxTop10HolderRate: cfg.migrationTracker?.maxTop10HolderRate || 0.40,
+      minHolder: cfg.migrationTracker?.minHolder || 20,
+      minLiquidity: cfg.migrationTracker?.minLiquidity || 5000,
+    } : globalFilters;
     const mc = token.market_cap || token.fdv || 0;
     const now = Math.floor(Date.now() / 1000);
     const ageMin = token.created_timestamp ? (now - token.created_timestamp) / 60 : 0;
 
     // Pre-calculate score for seen entry (even if rejected by filters)
-    // Apply filters (same as trending/signal)
-    if (ageMin > 0 && (ageMin < filters.minAgeMin || ageMin > filters.maxAgeMin)) return;
-    if (mc > 0 && (mc < filters.minMC || mc > filters.maxMC)) return;
+    // Apply filters (same as trending/signal, or migration-specific)
+    if (ageMin > 0 && (ageMin < filters.minAgeMin || ageMin > filters.maxAgeMin)) { console.log(`[TRACKER/${source}] ${token.symbol} REJECTED: age=${ageMin.toFixed(0)}m`); return; }
+    if (mc > 0 && (mc < filters.minMC || (filters.maxMC && mc > filters.maxMC))) { console.log(`[TRACKER/${source}] ${token.symbol} REJECTED: mc=$${Math.round(mc)}`); return; }
     if (token.is_wash_trading) return;
     const vol = token.volume_24h || token.volume || 0;
     if (vol > 0 && vol < (filters.minVolume || 0)) return;
     const bundler = token.bundler_rate || 0;
     if (bundler > 0 && bundler > (filters.maxBundlerRate || 1)) return;
+    const top10 = token.top_10_holder_rate || 0;
+    if (top10 > 0 && top10 > (filters.maxTop10HolderRate || 1)) return;
 
     // Score — baseScore murni, TANPA boost
     const baseScore = scoreToken(token, ageMin).score;
