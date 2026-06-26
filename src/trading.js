@@ -6,6 +6,7 @@
 const { Transaction, VersionedTransaction, PublicKey } = require('@solana/web3.js');
 const { getKeypair, getConnection } = require('./wallet');
 const { OnlinePumpAmmSdk, PUMP_AMM_SDK, canonicalPumpPoolPda } = require('@pump-fun/pump-swap-sdk');
+const { OnlinePumpSdk, PumpSdk, getBuyTokenAmountFromSolAmount, getSellSolAmountFromTokenAmount, bondingCurvePda } = require('@pump-fun/pump-sdk');
 const BN = require('bn.js');
 
 const JUPITER_API = process.env.JUPITER_API_URL || 'https://api.jup.ag/swap/v1';
@@ -89,86 +90,138 @@ async function getSwapTx(quote, userPublicKey, priorityFeeLamports = 50000) {
   }
 }
 
-// ─── PumpSwap SDK Fallback (Official @pump-fun/pump-swap-sdk) ───
+// ─── Pump.fun SDK Fallback (Official @pump-fun/pump-sdk + @pump-fun/pump-swap-sdk) ───
 
-// Find pAMM pool for a token (canonical PDA)
-async function findPumpPool(conn, tokenMint) {
+// Unified buy: auto-detect bonding curve vs AMM
+async function pumpSdkBuy(tokenMint, solAmount, slippageBps = 300) {
+  const keypair = getKeypair('default');
+  const conn = getConnection();
   const mint = new PublicKey(tokenMint);
-  const pda = canonicalPumpPoolPda(mint);
-  const info = await conn.getAccountInfo(pda);
-  if (info && info.owner.toBase58() === PUMP_AMM_PROGRAM) return pda;
-  return null;
+  const online = new OnlinePumpSdk(conn);
+  const offline = new PumpSdk();
+
+  console.log(`[TRADE] PumpSDK buy ${tokenMint} with ${solAmount} SOL`);
+
+  // Try bonding curve first
+  try {
+    const buyState = await online.fetchBuyState(mint, keypair.publicKey);
+    const global = await online.fetchGlobal();
+    const solLamports = new BN(Math.floor(solAmount * 1e9));
+    const tokenAmount = getBuyTokenAmountFromSolAmount(global, buyState.bondingCurve, solLamports);
+
+    const ixs = await offline.buyInstructions({
+      global,
+      bondingCurveAccountInfo: buyState.bondingCurveAccountInfo,
+      bondingCurve: buyState.bondingCurve,
+      associatedUserAccountInfo: buyState.associatedUserAccountInfo,
+      mint,
+      user: keypair.publicKey,
+      solAmount: solLamports,
+      amount: tokenAmount,
+      slippage: slippageBps / 10000,
+    });
+    console.log(`[TRADE] PumpSDK bonding curve: ${ixs.length} instructions`);
+
+    return await _sendIxs(conn, keypair, ixs, 'pump-bc');
+  } catch (bcErr) {
+    if (!bcErr.message?.includes('Bonding curve account not found')) throw bcErr;
+
+    // Migrated to AMM — use pump-swap-sdk
+    console.log(`[TRADE] Bonding curve not found (migrated), using PumpSwap AMM...`);
+    return await pumpSwapBuy(tokenMint, solAmount, slippageBps);
+  }
 }
 
-// PumpSwap Buy: sell SOL (base) → get token (quote)
-// Pool layout: base=SOL, quote=Token
+// Unified sell: auto-detect bonding curve vs AMM
+async function pumpSdkSell(tokenMint, tokenAmount, decimals, slippageBps = 300) {
+  const keypair = getKeypair('default');
+  const conn = getConnection();
+  const mint = new PublicKey(tokenMint);
+  const online = new OnlinePumpSdk(conn);
+  const offline = new PumpSdk();
+
+  console.log(`[TRADE] PumpSDK sell ${tokenAmount} of ${tokenMint}`);
+
+  try {
+    const sellState = await online.fetchSellState(mint, keypair.publicKey);
+    const global = await online.fetchGlobal();
+    const rawAmount = new BN(Math.round(tokenAmount * Math.pow(10, decimals)));
+    const minSol = getSellSolAmountFromTokenAmount(global, sellState.bondingCurve, rawAmount);
+
+    const ixs = await offline.sellInstructions({
+      global,
+      bondingCurveAccountInfo: sellState.bondingCurveAccountInfo,
+      bondingCurve: sellState.bondingCurve,
+      associatedUserAccountInfo: sellState.associatedUserAccountInfo,
+      mint,
+      user: keypair.publicKey,
+      amount: rawAmount,
+      minSolOutput: minSol,
+      slippage: slippageBps / 10000,
+    });
+    console.log(`[TRADE] PumpSDK bonding curve sell: ${ixs.length} instructions`);
+
+    return await _sendIxs(conn, keypair, ixs, 'pump-bc');
+  } catch (bcErr) {
+    if (!bcErr.message?.includes('Bonding curve account not found')) throw bcErr;
+
+    console.log(`[TRADE] Bonding curve not found (migrated), using PumpSwap AMM...`);
+    return await pumpSwapSell(tokenMint, tokenAmount, decimals, slippageBps);
+  }
+}
+
+// PumpSwap AMM buy (graduated tokens)
 async function pumpSwapBuy(tokenMint, solAmount, slippageBps = 300) {
   const keypair = getKeypair('default');
   const conn = getConnection();
+  const mint = new PublicKey(tokenMint);
 
-  console.log(`[TRADE] PumpSwap SDK buy ${tokenMint} with ${solAmount} SOL`);
+  // Find pool — try canonical PDA first, then search
+  let poolKey = canonicalPumpPoolPda(mint);
+  let info = await conn.getAccountInfo(poolKey);
+  if (!info || info.owner.toBase58() !== PUMP_AMM_PROGRAM) {
+    // Non-canonical pool — need to find via getProgramAccounts or fail
+    throw new Error('PumpSwap AMM pool not found');
+  }
 
-  const poolKey = await findPumpPool(conn, tokenMint);
-  if (!poolKey) throw new Error('PumpSwap pool not found for this token');
-
-  const online = new OnlinePumpAmmSdk(conn);
-  const offline = PUMP_AMM_SDK;
-
-  const swapState = await online.swapSolanaStateNoPool(poolKey, keypair.publicKey);
+  const ammOnline = new OnlinePumpAmmSdk(conn);
+  const ammOffline = PUMP_AMM_SDK;
+  const swapState = await ammOnline.swapSolanaStateNoPool(poolKey, keypair.publicKey);
   const solLamports = new BN(Math.floor(solAmount * 1e9));
   const slippage = slippageBps / 10000;
 
-  const ixs = await offline.sellBaseInput(swapState, solLamports, slippage);
-  console.log(`[TRADE] PumpSwap SDK: ${ixs.length} instructions`);
+  const ixs = await ammOffline.sellBaseInput(swapState, solLamports, slippage);
+  console.log(`[TRADE] PumpSwap AMM buy: ${ixs.length} instructions`);
 
-  const { blockhash } = await conn.getLatestBlockhash('confirmed');
-  const tx = new Transaction();
-  tx.recentBlockhash = blockhash;
-  tx.feePayer = keypair.publicKey;
-  for (const ix of ixs) tx.add(ix);
-  tx.sign(keypair);
-
-  const sig = await conn.sendRawTransaction(tx.serialize(), { skipPreflight: true, maxRetries: 2 });
-  console.log(`[TRADE] PumpSwap buy TX: ${sig}`);
-
-  const status = await Promise.race([
-    conn.confirmTransaction(sig, 'confirmed'),
-    new Promise((_, rej) => setTimeout(() => rej(new Error('confirmTransaction timeout (60s)')), 60_000)),
-  ]);
-
-  const err = status?.err || status?.value?.err;
-  if (err) throw new Error(`PumpSwap buy TX failed: ${JSON.stringify(err)}`);
-
-  const details = await conn.getTransaction(sig, { maxSupportedTransactionVersion: 0 });
-  if (details?.meta?.err) throw new Error(`PumpSwap buy instruction error: ${JSON.stringify(details.meta.err)}`);
-
-  return {
-    success: true, signature: sig, inputAmount: solAmount,
-    outputAmount: '0', decimals: 6, source: 'pumpswap-sdk',
-    explorer: `https://solscan.io/tx/${sig}`,
-  };
+  return await _sendIxs(conn, keypair, ixs, 'pump-amm');
 }
 
-// PumpSwap Sell: sell token (quote) → get SOL (base)
+// PumpSwap AMM sell (graduated tokens)
 async function pumpSwapSell(tokenMint, tokenAmount, decimals, slippageBps = 300) {
   const keypair = getKeypair('default');
   const conn = getConnection();
+  const mint = new PublicKey(tokenMint);
 
-  console.log(`[TRADE] PumpSwap SDK sell ${tokenAmount} of ${tokenMint}`);
+  let poolKey = canonicalPumpPoolPda(mint);
+  let info = await conn.getAccountInfo(poolKey);
+  if (!info || info.owner.toBase58() !== PUMP_AMM_PROGRAM) {
+    throw new Error('PumpSwap AMM pool not found');
+  }
 
-  const poolKey = await findPumpPool(conn, tokenMint);
-  if (!poolKey) throw new Error('PumpSwap pool not found for this token');
-
-  const online = new OnlinePumpAmmSdk(conn);
-  const offline = PUMP_AMM_SDK;
-
-  const swapState = await online.swapSolanaStateNoPool(poolKey, keypair.publicKey);
+  const ammOnline = new OnlinePumpAmmSdk(conn);
+  const ammOffline = PUMP_AMM_SDK;
+  const swapState = await ammOnline.swapSolanaStateNoPool(poolKey, keypair.publicKey);
   const rawAmount = new BN(Math.round(tokenAmount * Math.pow(10, decimals)));
   const slippage = slippageBps / 10000;
 
-  const ixs = await offline.sellQuoteInput(swapState, rawAmount, slippage);
-  console.log(`[TRADE] PumpSwap SDK: ${ixs.length} instructions`);
+  const ixs = await ammOffline.sellQuoteInput(swapState, rawAmount, slippage);
+  console.log(`[TRADE] PumpSwap AMM sell: ${ixs.length} instructions`);
 
+  return await _sendIxs(conn, keypair, ixs, 'pump-amm');
+}
+
+// Shared: build, sign, send, confirm
+async function _sendIxs(conn, keypair, ixs, source) {
   const { blockhash } = await conn.getLatestBlockhash('confirmed');
   const tx = new Transaction();
   tx.recentBlockhash = blockhash;
@@ -177,7 +230,7 @@ async function pumpSwapSell(tokenMint, tokenAmount, decimals, slippageBps = 300)
   tx.sign(keypair);
 
   const sig = await conn.sendRawTransaction(tx.serialize(), { skipPreflight: true, maxRetries: 2 });
-  console.log(`[TRADE] PumpSwap sell TX: ${sig}`);
+  console.log(`[TRADE] ${source} TX: ${sig}`);
 
   const status = await Promise.race([
     conn.confirmTransaction(sig, 'confirmed'),
@@ -185,14 +238,13 @@ async function pumpSwapSell(tokenMint, tokenAmount, decimals, slippageBps = 300)
   ]);
 
   const err = status?.err || status?.value?.err;
-  if (err) throw new Error(`PumpSwap sell TX failed: ${JSON.stringify(err)}`);
+  if (err) throw new Error(`${source} TX failed: ${JSON.stringify(err)}`);
 
   const details = await conn.getTransaction(sig, { maxSupportedTransactionVersion: 0 });
-  if (details?.meta?.err) throw new Error(`PumpSwap sell instruction error: ${JSON.stringify(details.meta.err)}`);
+  if (details?.meta?.err) throw new Error(`${source} TX instruction error: ${JSON.stringify(details.meta.err)}`);
 
   return {
-    success: true, signature: sig, inputAmount: tokenAmount,
-    outputSol: 0, source: 'pumpswap-sdk',
+    success: true, signature: sig, source,
     explorer: `https://solscan.io/tx/${sig}`,
   };
 }
@@ -205,19 +257,8 @@ async function buyToken(tokenMint, solAmount, walletLabel = 'default', slippageB
     const msg = jupErr.message || '';
     // If pAMM broken → fallback to PumpFun bonding curve
     if (msg.includes('untradeable') || msg.includes('pAMM') || msg.includes('only route') || msg.includes('all routes')) {
-      console.log(`[TRADE] Jupiter failed (${msg.slice(0,80)}), falling back to PumpFun bonding curve...`);
-      const { pumpFunBuy, isOnBondingCurve } = require('./pumpfun');
-      const onCurve = await isOnBondingCurve(tokenMint);
-      if (!onCurve) {
-        console.log(`[TRADE] Token not on bonding curve (migrated to AMM), trying PumpSwap SDK...`);
-        try {
-          return await pumpSwapBuy(tokenMint, solAmount, slippageBps);
-        } catch (psErr) {
-          console.log(`[TRADE] PumpSwap SDK also failed: ${psErr.message}`);
-          throw jupErr;
-        }
-      }
-      return await pumpFunBuy(tokenMint, solAmount, slippageBps);
+      console.log(`[TRADE] Jupiter failed (${msg.slice(0,80)}), falling back to Pump.fun SDK...`);
+      return await pumpSdkBuy(tokenMint, solAmount, slippageBps);
     }
     throw jupErr;
   }
@@ -301,12 +342,12 @@ async function _jupiterBuy(tokenMint, solAmount, walletLabel, slippageBps, _isRe
       try {
         sig = await conn.sendTransaction(freshTx, { skipPreflight: false, maxRetries: 3 });
       } catch (freshErr) {
-        // This route also failed — try PumpSwap SDK as last resort
-        console.log(`[TRADE] Fresh route also failed: ${freshErr.message?.slice(0,80)}, trying PumpSwap SDK...`);
+        // This route also failed — try Pump.fun SDK as last resort
+        console.log(`[TRADE] Fresh route also failed: ${freshErr.message?.slice(0,80)}, trying Pump.fun SDK...`);
         try {
-          return await pumpSwapBuy(tokenMint, solAmount, slippageBps);
+          return await pumpSdkBuy(tokenMint, solAmount, slippageBps);
         } catch (psErr) {
-          console.log(`[TRADE] PumpSwap SDK also failed: ${psErr.message}`);
+          console.log(`[TRADE] Pump.fun SDK also failed: ${psErr.message}`);
           throw new Error('Token untradeable — all routes failed');
         }
       }
@@ -400,8 +441,8 @@ async function sellToken(tokenMint, tokenAmount, decimals, walletLabel = 'defaul
   } catch (sellErr) {
     const errStr = sellErr.message || '';
     if (errStr.includes('pAMM') || errStr.includes('account required')) {
-      console.log(`[TRADE] Sell failed (pAMM broken), trying PumpSwap SDK...`);
-      return await pumpSwapSell(tokenMint, tokenAmount, decimals, slippageBps);
+      console.log(`[TRADE] Sell failed (pAMM broken), trying Pump.fun SDK...`);
+      return await pumpSdkSell(tokenMint, tokenAmount, decimals, slippageBps);
     }
     throw sellErr;
   }
