@@ -149,6 +149,7 @@ const MENU = {
     [{ text: '📡 Trackers', callback_data: 'noop' }],
     [{ text: `🧠 SM: ${cfg.smartmoneyTracker?.smartmoney?.enabled !== false ? '✅ ON' : '❌ OFF'}`, callback_data: 'tracker_edit_sm' },
      { text: `👑 KOL: ${cfg.kolTracker?.kol?.enabled !== false ? '✅ ON' : '❌ OFF'}`, callback_data: 'tracker_edit_kol' }],
+    [{ text: `🚀 Migration: ${cfg.migrationTracker?.enabled ? '✅ ON' : '❌ OFF'}`, callback_data: 'tracker_edit_migration' }],
     // Buy Lock
     [{ text: '🔒 Buy Lock', callback_data: 'noop' }],
     [{ text: `${cfg.buyLock?.enabled !== false ? '✅ Lock ON' : '❌ Lock OFF'}`, callback_data: 'cfg_buylock_toggle' },
@@ -429,6 +430,144 @@ async function handleCallbackQuery(cq) {
           [{ text: '⬅️ Config', callback_data: 'menu_config' }],
         ]
       }
+    });
+    return;
+  }
+
+  // ── Migration Tracker Edit ──
+  if (data === 'tracker_edit_migration') {
+    const { getAutoConfig } = require('../src/autotrade');
+    const { DEFAULT_MIGRATION_CONFIG } = require('../src/migration-tracker');
+
+    const cfg = getAutoConfig();
+    if (!cfg.migrationTracker) cfg.migrationTracker = { ...DEFAULT_MIGRATION_CONFIG };
+    const t = cfg.migrationTracker;
+
+    const lines = [
+      `🚀 <b>Migration Tracker Settings</b>`,
+      ``,
+      `Detects tokens that JUST migrated from bonding curve to AMM`,
+      ``,
+      `Status: ${t.enabled ? '✅ ON' : '❌ OFF'}`,
+      `Interval: ${t.intervalSec || 60}s`,
+      `MC Range: $${fmtMc(t.mcMin || 5000)} - $${fmtMc(t.mcMax || 200000)}`,
+      `Min Liquidity: $${(t.minLiquidity || 5000).toLocaleString()}`,
+      `Max Bundler: ${((t.maxBundlerRate || 0.30) * 100).toFixed(0)}%`,
+      `Max Top10: ${((t.maxTop10HolderRate || 0.40) * 100).toFixed(0)}%`,
+      `Min Holders: ${t.minHolder || 20}`,
+      `Min Score: ${t.minScore || 35}`,
+    ];
+
+    await tgApi('editMessageText', {
+      chat_id: chatId,
+      message_id: msgId,
+      text: lines.join('\n'),
+      parse_mode: 'HTML',
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: `${t.enabled ? '🔴 OFF' : '🟢 ON'}`, callback_data: 'tracker_toggle_migration' },
+           { text: `⏱ ${t.intervalSec || 60}s`, callback_data: 'tracker_ask_interval_migration' }],
+          [{ text: `💰 MC: $${fmtMc(t.mcMin || 5000)}-${fmtMc(t.mcMax || 200000)}`, callback_data: 'tracker_ask_mc_migration' },
+           { text: `💧 Liq: $${(t.minLiquidity || 5000).toLocaleString()}`, callback_data: 'tracker_ask_liq_migration' }],
+          [{ text: `🎯 Bundler: ${((t.maxBundlerRate || 0.30) * 100).toFixed(0)}%`, callback_data: 'tracker_ask_bundler_migration' },
+           { text: `👥 Top10: ${((t.maxTop10HolderRate || 0.40) * 100).toFixed(0)}%`, callback_data: 'tracker_ask_top10_migration' }],
+          [{ text: `👤 Holders: ${t.minHolder || 20}`, callback_data: 'tracker_ask_holders_migration' },
+           { text: `📊 Score: ${t.minScore || 35}`, callback_data: 'tracker_ask_minscore_migration' }],
+          [{ text: '⬅️ Config', callback_data: 'menu_config' }],
+        ]
+      }
+    });
+    return;
+  }
+
+  // ── Migration Tracker Toggle ──
+  if (data === 'tracker_toggle_migration') {
+    const { getAutoConfig, updateAutoConfig } = require('../src/autotrade');
+    const { DEFAULT_MIGRATION_CONFIG } = require('../src/migration-tracker');
+    const cfg = getAutoConfig();
+    if (!cfg.migrationTracker) cfg.migrationTracker = { ...DEFAULT_MIGRATION_CONFIG };
+    const newEnabled = !cfg.migrationTracker.enabled;
+    updateAutoConfig({ migrationTracker: { ...cfg.migrationTracker, enabled: newEnabled } });
+    const updated = getAutoConfig();
+    // Re-show the migration settings
+    const t = updated.migrationTracker;
+    const lines = [
+      `🚀 <b>Migration Tracker Settings</b>`,
+      ``,
+      `Detects tokens that JUST migrated from bonding curve to AMM`,
+      ``,
+      `Status: ${t.enabled ? '✅ ON' : '❌ OFF'}`,
+      `Interval: ${t.intervalSec || 60}s`,
+      `MC Range: $${fmtMc(t.mcMin || 5000)} - $${fmtMc(t.mcMax || 200000)}`,
+      `Min Liquidity: $${(t.minLiquidity || 5000).toLocaleString()}`,
+      `Max Bundler: ${((t.maxBundlerRate || 0.30) * 100).toFixed(0)}%`,
+      `Max Top10: ${((t.maxTop10HolderRate || 0.40) * 100).toFixed(0)}%`,
+      `Min Holders: ${t.minHolder || 20}`,
+      `Min Score: ${t.minScore || 35}`,
+    ];
+    await tgApi('editMessageText', {
+      chat_id: chatId,
+      message_id: msgId,
+      text: lines.join('\n'),
+      parse_mode: 'HTML',
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: `${t.enabled ? '🔴 OFF' : '🟢 ON'}`, callback_data: 'tracker_toggle_migration' },
+           { text: `⏱ ${t.intervalSec || 60}s`, callback_data: 'tracker_ask_interval_migration' }],
+          [{ text: `💰 MC: $${fmtMc(t.mcMin || 5000)}-${fmtMc(t.mcMax || 200000)}`, callback_data: 'tracker_ask_mc_migration' },
+           { text: `💧 Liq: $${(t.minLiquidity || 5000).toLocaleString()}`, callback_data: 'tracker_ask_liq_migration' }],
+          [{ text: `🎯 Bundler: ${((t.maxBundlerRate || 0.30) * 100).toFixed(0)}%`, callback_data: 'tracker_ask_bundler_migration' },
+           { text: `👥 Top10: ${((t.maxTop10HolderRate || 0.40) * 100).toFixed(0)}%`, callback_data: 'tracker_ask_top10_migration' }],
+          [{ text: `👤 Holders: ${t.minHolder || 20}`, callback_data: 'tracker_ask_holders_migration' },
+           { text: `📊 Score: ${t.minScore || 35}`, callback_data: 'tracker_ask_minscore_migration' }],
+          [{ text: '⬅️ Config', callback_data: 'menu_config' }],
+        ]
+      }
+    });
+    return;
+  }
+
+  // ── Migration Tracker Ask Value ──
+  if (data.startsWith('tracker_ask_') && data.endsWith('_migration')) {
+    const field = data.replace('tracker_ask_', '').replace('_migration', '');
+    const fieldLabels = {
+      interval: 'Interval (detik)',
+      mc: 'MC Range (min,max)',
+      liq: 'Min Liquidity (USD)',
+      bundler: 'Max Bundler %',
+      top10: 'Max Top10 %',
+      holders: 'Min Holders',
+      minscore: 'Min Score',
+    };
+    const examples = {
+      interval: '60',
+      mc: '5000,200000',
+      liq: '5000',
+      bundler: '30',
+      top10: '40',
+      holders: '20',
+      minscore: '35',
+    };
+
+    if (!fieldLabels[field]) return;
+
+    await tgApi('sendMessage', {
+      chat_id: chatId,
+      text: `✏️ <b>Migration — ${fieldLabels[field]}</b>\n\nKirim angka baru:\nContoh: <code>${examples[field]}</code>`,
+      parse_mode: 'HTML',
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '❌ Cancel', callback_data: 'tracker_edit_migration' }],
+        ]
+      }
+    });
+
+    pendingInputs.set(chatId, {
+      type: 'migration_tracker',
+      field,
+      hint: `Kirim angka untuk ${fieldLabels[field]}`,
+      min: 0,
+      max: 999999,
     });
     return;
   }
@@ -764,6 +903,83 @@ async function handlePendingInput(chatId, text) {
            { text: `⏱ ${t.intervalSec}s`, callback_data: `tracker_ask_interval_${prefix}` },
            { text: `💰 $${t.minAmountUsd}`, callback_data: `tracker_ask_amount_${prefix}` }],
           [{ text: `📊 Min Score: ${t.minScore || minScoreDefault}`, callback_data: `tracker_ask_minscore_${prefix}` }],
+          [{ text: '⬅️ Config', callback_data: 'menu_config' }],
+        ]
+      }
+    });
+    return true;
+  }
+
+  // Migration Tracker field
+  if (pending.type === 'migration_tracker') {
+    const { updateAutoConfig, getAutoConfig } = require('../src/autotrade');
+    const { DEFAULT_MIGRATION_CONFIG } = require('../src/migration-tracker');
+
+    const cfg = getAutoConfig();
+    if (!cfg.migrationTracker) cfg.migrationTracker = { ...DEFAULT_MIGRATION_CONFIG };
+
+    const fieldMap = {
+      interval: 'intervalSec',
+      liq: 'minLiquidity',
+      bundler: 'maxBundlerRate',
+      top10: 'maxTop10HolderRate',
+      holders: 'minHolder',
+      minscore: 'minScore',
+    };
+
+    let value = num;
+    // Special handling for percentage fields (convert to decimal)
+    if (pending.field === 'bundler' || pending.field === 'top10') {
+      value = num / 100;
+    }
+    // Special handling for MC range
+    if (pending.field === 'mc') {
+      const parts = text.split(',').map(s => parseFloat(s.trim()));
+      if (parts.length === 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
+        updateAutoConfig({ migrationTracker: { ...cfg.migrationTracker, mcMin: parts[0], mcMax: parts[1] } });
+        pendingInputs.delete(chatId);
+        // Re-trigger edit
+        const editCb = { data: 'tracker_edit_migration', message: { message_id: msgId }, from: { id: chatId } };
+        return;
+      }
+      return; // invalid format
+    }
+
+    if (fieldMap[pending.field]) {
+      updateAutoConfig({ migrationTracker: { ...cfg.migrationTracker, [fieldMap[pending.field]]: value } });
+    }
+    pendingInputs.delete(chatId);
+
+    // Re-show migration settings
+    const t = getAutoConfig().migrationTracker;
+    const lines = [
+      `🚀 <b>Migration Tracker Settings</b>`,
+      ``,
+      `Detects tokens that JUST migrated from bonding curve to AMM`,
+      ``,
+      `Status: ${t.enabled ? '✅ ON' : '❌ OFF'}`,
+      `Interval: ${t.intervalSec || 60}s`,
+      `MC Range: $${fmtMc(t.mcMin || 5000)} - $${fmtMc(t.mcMax || 200000)}`,
+      `Min Liquidity: $${(t.minLiquidity || 5000).toLocaleString()}`,
+      `Max Bundler: ${((t.maxBundlerRate || 0.30) * 100).toFixed(0)}%`,
+      `Max Top10: ${((t.maxTop10HolderRate || 0.40) * 100).toFixed(0)}%`,
+      `Min Holders: ${t.minHolder || 20}`,
+      `Min Score: ${t.minScore || 35}`,
+    ];
+    await tgApi('sendMessage', {
+      chat_id: chatId,
+      text: lines.join('\n'),
+      parse_mode: 'HTML',
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: `${t.enabled ? '🔴 OFF' : '🟢 ON'}`, callback_data: 'tracker_toggle_migration' },
+           { text: `⏱ ${t.intervalSec || 60}s`, callback_data: 'tracker_ask_interval_migration' }],
+          [{ text: `💰 MC: $${fmtMc(t.mcMin || 5000)}-${fmtMc(t.mcMax || 200000)}`, callback_data: 'tracker_ask_mc_migration' },
+           { text: `💧 Liq: $${(t.minLiquidity || 5000).toLocaleString()}`, callback_data: 'tracker_ask_liq_migration' }],
+          [{ text: `🎯 Bundler: ${((t.maxBundlerRate || 0.30) * 100).toFixed(0)}%`, callback_data: 'tracker_ask_bundler_migration' },
+           { text: `👥 Top10: ${((t.maxTop10HolderRate || 0.40) * 100).toFixed(0)}%`, callback_data: 'tracker_ask_top10_migration' }],
+          [{ text: `👤 Holders: ${t.minHolder || 20}`, callback_data: 'tracker_ask_holders_migration' },
+           { text: `📊 Score: ${t.minScore || 35}`, callback_data: 'tracker_ask_minscore_migration' }],
           [{ text: '⬅️ Config', callback_data: 'menu_config' }],
         ]
       }

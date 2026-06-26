@@ -16,11 +16,13 @@ const { autoBuy, getAutoConfig } = require('./src/autotrade');
 const { sendTelegram, fmtMc } = require('./lib/shared');
 const { alertButtons } = require('./src/buttons');
 const { runTrackerScan, getTrackerConfig } = require('./src/smartmoney-tracker');
+const { runMigrationScan, getMigrationConfig } = require('./src/migration-tracker');
 const { logDecision } = require('./src/analytics');
 let scanning = false;
 let signalScanning = false;
 let smScanning = false;
 let kolScanning = false;
+let migrationScanning = false;
 
 async function main() {
   console.log(`[${new Date().toISOString()}] GMGN Screener + Trader started`);
@@ -237,6 +239,7 @@ async function main() {
     const sourceMinScore = {
       smartmoney: cfg.smartmoneyTracker?.smartmoney?.minScore || 50,
       kol: cfg.kolTracker?.kol?.minScore || 55,
+      migration: cfg.migrationTracker?.minScore || 35,
     };
     const minScore = sourceMinScore[source] || cfg.minScore || 50;
 
@@ -266,7 +269,7 @@ async function main() {
     // ── Confidence calculation ──
     const wallets = token._uniqueWallets || 1;
     const confidence = getConfidence(source, wallets);
-    const sourceLabel = source === 'smartmoney' ? '🧠 SmartMoney' : '👑 KOL';
+    const sourceLabel = source === 'smartmoney' ? '🧠 SmartMoney' : source === 'migration' ? '🚀 Migration' : '👑 KOL';
 
     // ── Buy lock check ──
     if (isBuyLocked(token.address)) {
@@ -376,6 +379,25 @@ async function main() {
 
   setTimeout(() => trackerTick('smartmoney'), 7000);  // offset from signal scanner
   setTimeout(() => trackerTick('kol'), 9000);          // offset from smartmoney
+
+  // Migration event tracker
+  function migrationTick() {
+    const migCfg = getMigrationConfig();
+    if (!migCfg.enabled) {
+      setTimeout(migrationTick, 30000);
+      return;
+    }
+    if (migrationScanning) {
+      console.log('[MIGRATION] Previous scan still running, skipping');
+    } else {
+      migrationScanning = true;
+      runMigrationScan((token) => trackerProcessToken(token, 'migration'))
+        .catch(e => console.error('[MIGRATION]', e))
+        .finally(() => { migrationScanning = false; });
+    }
+    setTimeout(migrationTick, (migCfg.intervalSec || 60) * 1000);
+  }
+  setTimeout(migrationTick, 11000); // offset from KOL tracker
 
   // Start auto-trade position monitor
   startMonitor();
