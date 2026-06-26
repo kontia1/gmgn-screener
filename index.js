@@ -244,7 +244,7 @@ async function main() {
     const bundler = token.bundler_rate || 0;
     if (bundler > 0 && bundler > (filters.maxBundlerRate || 1)) return;
     const top10 = token.top_10_holder_rate || 0;
-    if (top10 > 0 && top10 > (filters.maxTop10HolderRate || 1)) return;
+    if (top10 > 0 && top10 > (filters.maxTop10HolderRate || 1)) { console.log(`[TRACKER/${source}] ${token.symbol} REJECTED: top10=${(top10*100).toFixed(0)}% (max=${((filters.maxTop10HolderRate||1)*100).toFixed(0)}%)`); return; }
 
     // Score — baseScore murni, TANPA boost. Use _score if already set (migration events get base 60-70)
     const baseScore = Math.max(token._score || 0, scoreToken(token, ageMin).score);
