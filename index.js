@@ -150,7 +150,7 @@ async function main() {
           if (top10 > CONFIG.maxTop10HolderRate) { console.log(`[SIGNAL:FILTER] ${_sym} REJECTED: top10=${(top10*100).toFixed(0)}% (max=${(CONFIG.maxTop10HolderRate*100).toFixed(0)}%)`); return; }
 
           // Hard block: young token + bot-inflated buy pressure = likely rug
-          const _ratio = token.buyRatio || token.buy_ratio || (token.buys && token.sells ? token.buys / Math.max(1, token.sells) : 0);
+          const _ratio = token.buyRatio || token.buy_ratio || (token.buys ? token.buys / Math.max(1, token.sells || 0) : 0);
           if (ageMin < 1 && _ratio > 3.0) {
             console.log(`[SIGNAL:FILTER] ${_sym} REJECTED: age ${ageMin.toFixed(1)}m + buyRatio ${_ratio.toFixed(1)}x (young+bot-inflated)`);
             return;
