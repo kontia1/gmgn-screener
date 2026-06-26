@@ -199,9 +199,17 @@ async function enrichToken(token) {
 }
 
 // ─── Detect Migration Events ────────────────────────────
-function detectMigrations(currentTokens) {
+// Tracks TWO signals:
+// 1. migrated_pool_exchange: was empty → now has value (GMGN transient field)
+// 2. exchange: was 'pump' → now is AMM exchange (more reliable, persists)
+const ALL_TARGETS = ['pump_amm', 'meteora_damm_v2', 'meteora_virtual_curve', 'meteora_amm', 'raydium', 'raydium_cpmm'];
+const BONDING_EXCHANGES = ['pump', ''];
+
+function detectMigrations(currentTokens, config) {
   const events = [];
   const currentSnapshot = new Map();
+  // Merge hardcoded targets with user config
+  const targets = new Set([...ALL_TARGETS, ...(config?.targetExchanges || [])]);
 
   for (const token of currentTokens) {
     const addr = token.address;
@@ -219,20 +227,33 @@ function detectMigrations(currentTokens) {
 
     // Compare with previous snapshot
     const prev = previousSnapshot.get(addr);
-    if (prev) {
-      const prevMpe = prev.migrated_pool_exchange || '';
-      // Migration event: was empty, now has value
-      if (!prevMpe && currentMpe) {
-        events.push({
-          ...token,
-          migrationEvent: true,
-          fromExchange: prevMpe || 'bonding_curve',
-          toExchange: currentMpe,
-        });
-      }
+    if (!prev) continue;
+
+    const prevMpe = prev.migrated_pool_exchange || '';
+    const prevExchange = prev.exchange || '';
+
+    // Signal 1: migrated_pool_exchange was empty → now has value
+    if (!prevMpe && currentMpe) {
+      events.push({
+        ...token,
+        migrationEvent: true,
+        fromExchange: prevMpe || 'bonding_curve',
+        toExchange: currentMpe,
+        _detectionMethod: 'mpe_field',
+      });
+      continue; // don't double-count
     }
-    // If token is NEW in trending (not in previous snapshot) AND already migrated,
-    // it's not a migration event — just a new trending entry
+
+    // Signal 2: exchange changed from bonding → AMM (more reliable)
+    if (BONDING_EXCHANGES.includes(prevExchange) && targets.has(currentExchange)) {
+      events.push({
+        ...token,
+        migrationEvent: true,
+        fromExchange: prevExchange || 'bonding_curve',
+        toExchange: currentExchange,
+        _detectionMethod: 'exchange_change',
+      });
+    }
   }
 
   // Update snapshot
@@ -248,7 +269,7 @@ async function runMigrationScan(processToken) {
   const tokens = await fetchAllSources();
   if (!tokens.length) return;
 
-  const events = detectMigrations(tokens);
+  const events = detectMigrations(tokens, config);
   if (!events.length) return;
 
   console.log(`[MIGRATION] Detected ${events.length} migration event(s)`);
@@ -325,9 +346,13 @@ async function runMigrationScan(processToken) {
     enriched.source = 'migration';
     enriched._migrationFrom = event.fromExchange;
     enriched._migrationTo = event.toExchange;
-    enriched._score = 60; // migration events get base score 60 (strong signal)
+    enriched._detectionMethod = event._detectionMethod;
+    // External exchange migrations get higher base score (rarer, more alpha)
+    const isExternal = !['pump_amm', ''].includes(event.toExchange);
+    enriched._score = isExternal ? 70 : 60;
 
-    console.log(`[MIGRATION] 🎯 ${sym} migrated ${event.fromExchange} → ${event.toExchange} | MC=$${Math.round(mc)} | Liq=$${Math.round(liq)}`);
+    const tag = isExternal ? '🔗 EXTERNAL' : '🎯';
+    console.log(`[MIGRATION] ${tag} ${sym} ${event.fromExchange} → ${event.toExchange} (${event._detectionMethod}) | MC=$${Math.round(mc)} | Liq=$${Math.round(liq)}`);
 
     // Feed into pipeline
     await processToken(enriched, 'migration');
