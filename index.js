@@ -238,11 +238,11 @@ async function main() {
     // Apply filters (same as trending/signal, or migration-specific)
     if (ageMin > 0 && (ageMin < filters.minAgeMin || ageMin > filters.maxAgeMin)) { console.log(`[TRACKER/${source}] ${token.symbol} REJECTED: age=${ageMin.toFixed(0)}m`); return; }
     if (mc > 0 && (mc < filters.minMC || (filters.maxMC && mc > filters.maxMC))) { console.log(`[TRACKER/${source}] ${token.symbol} REJECTED: mc=$${Math.round(mc)}`); return; }
-    if (token.is_wash_trading) return;
+    if (token.is_wash_trading) { console.log(`[TRACKER/${source}] ${token.symbol} REJECTED: wash_trading`); return; }
     const vol = token.volume_24h || token.volume || 0;
-    if (vol > 0 && vol < (filters.minVolume || 0)) return;
+    if (vol > 0 && vol < (filters.minVolume || 0)) { console.log(`[TRACKER/${source}] ${token.symbol} REJECTED: vol=$${Math.round(vol)} (min=${filters.minVolume})`); return; }
     const bundler = token.bundler_rate || 0;
-    if (bundler > 0 && bundler > (filters.maxBundlerRate || 1)) return;
+    if (bundler > 0 && bundler > (filters.maxBundlerRate || 1)) { console.log(`[TRACKER/${source}] ${token.symbol} REJECTED: bundler=${(bundler*100).toFixed(0)}% (max=${((filters.maxBundlerRate||1)*100).toFixed(0)}%)`); return; }
     const top10 = token.top_10_holder_rate || 0;
     if (top10 > 0 && top10 > (filters.maxTop10HolderRate || 1)) { console.log(`[TRACKER/${source}] ${token.symbol} REJECTED: top10=${(top10*100).toFixed(0)}% (max=${((filters.maxTop10HolderRate||1)*100).toFixed(0)}%)`); return; }
 
