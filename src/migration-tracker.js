@@ -187,9 +187,9 @@ async function enrichToken(token) {
 
     token.volume_24h = parseFloat(price.volume_24h) || token.volume || 0;
     token.liquidity = parseFloat(pool.liquidity) || token.liquidity || 0;
-    token.holder_count = price.holder_count || token.holder_count || 0;
-    token.exchange = pool.exchange || token.exchange || '';  // update exchange from token info (most reliable)
-    token.market_cap = parseFloat(price.market_cap) || 0;  // DON'T fallback to raw event FDV
+    token.holder_count = stat.holder_count || price.holder_count || token.holder_count || 0;  // stat first (Meteora tokens)
+    token.exchange = pool.exchange || token.exchange || '';
+    token.market_cap = parseFloat(price.market_cap) || 0;
     token.price_usd = parseFloat(price.price) || 0;
     token.circulating_supply = parseFloat(price.circulating_supply) || 0;
     token.top_10_holder_rate = stat.top_10_holder_rate || token.top_10_holder_rate || 0;
