@@ -149,6 +149,31 @@ async function main() {
           const top10 = token.top_10_holder_rate || 0;
           if (top10 > CONFIG.maxTop10HolderRate) { console.log(`[SIGNAL:FILTER] ${_sym} REJECTED: top10=${(top10*100).toFixed(0)}% (max=${(CONFIG.maxTop10HolderRate*100).toFixed(0)}%)`); return; }
 
+          // Hard block: young token + bot-inflated buy pressure = likely rug
+          const _ratio = token.buyRatio || token.buy_ratio || (token.buys && token.sells ? token.buys / Math.max(1, token.sells) : 0);
+          if (ageMin < 1 && _ratio > 3.0) {
+            console.log(`[SIGNAL:FILTER] ${_sym} REJECTED: age ${ageMin.toFixed(1)}m + buyRatio ${_ratio.toFixed(1)}x (young+bot-inflated)`);
+            return;
+          }
+
+          // Duplicate tweet URL dedup — same tweet = rug cluster
+          const _twUrl = token.twitter_username || token.twitter || '';
+          if (_twUrl.includes('/status/')) {
+            if (!signalTick._seenTweets) signalTick._seenTweets = new Map();
+            const _existing = signalTick._seenTweets.get(_twUrl);
+            if (_existing && Date.now() - _existing < 3600000) {
+              console.log(`[SIGNAL:FILTER] ${_sym} REJECTED: duplicate tweet ${_twUrl.slice(0,40)}...`);
+              return;
+            }
+            signalTick._seenTweets.set(_twUrl, Date.now());
+            // Cleanup old entries every 100 calls
+            if (signalTick._seenTweets.size > 200) {
+              for (const [k, v] of signalTick._seenTweets) {
+                if (Date.now() - v > 3600000) signalTick._seenTweets.delete(k);
+              }
+            }
+          }
+
           const { score: baseScore, reasons } = scoreToken(token, ageMin);
           const signalResult = applySignalAdjustment(token, baseScore, token._activeSignals || [], signalCfg);
           if (signalResult.signalMeta.hardReject) { console.log(`[SIGNAL:FILTER] ${_sym} REJECTED: hardReject`); return; }

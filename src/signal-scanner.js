@@ -20,7 +20,7 @@ const DEFAULT_SIGNAL_CONFIG = {
   mcMax: 100000,
   signalRatio: 0.30,
   minContribution: 10,
-  maxContribution: 25,
+  maxContribution: 15,
   antiDoubleCount: {
     enabled: true,
     factor: 0.5,
