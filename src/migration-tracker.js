@@ -188,7 +188,7 @@ async function enrichToken(token) {
     token.liquidity = parseFloat(pool.liquidity) || token.liquidity || 0;
     token.holder_count = price.holder_count || token.holder_count || 0;
     token.exchange = pool.exchange || token.exchange || '';  // update exchange from token info (most reliable)
-    token.market_cap = parseFloat(price.market_cap) || token.market_cap || 0;
+    token.market_cap = parseFloat(price.market_cap) || 0;  // DON'T fallback to raw event FDV
     token.price_usd = parseFloat(price.price) || 0;
     token.circulating_supply = parseFloat(price.circulating_supply) || 0;
     token.top_10_holder_rate = stat.top_10_holder_rate || token.top_10_holder_rate || 0;
@@ -315,14 +315,15 @@ async function runMigrationScan(processToken) {
     const enriched = await enrichToken(event);
 
     // Use enriched data for all filters
-    const mc = enriched.market_cap || (enriched.price_usd || 0) * (enriched.circulating_supply || 0) || event.market_cap || event.fdv || 0;
+    const mc = enriched.market_cap || (enriched.price_usd || 0) * (enriched.circulating_supply || 0) || 0;
     const liq = enriched.liquidity || 0;
     const bundler = enriched.bundler_rate || event.bundler_rate || 0;
     const top10 = enriched.top_10_holder_rate || event.top_10_holder_rate || 0;
     const holders = enriched.holder_count || 0;
+    const isExternal = !['pump', 'pump_amm', ''].includes(enriched.exchange || event.exchange || '');
 
-    // Filter: MC range
-    if (mc < config.mcMin || (config.mcMax && mc > config.mcMax)) {
+    // Filter: MC range (skip for external exchange — MC data unreliable for Meteora tokens)
+    if (!isExternal && mc > 0 && (mc < config.mcMin || (config.mcMax && mc > config.mcMax))) {
       console.log(`[MIGRATION] ${sym} REJECTED: mc=$${Math.round(mc)} (min=${config.mcMin} max=${config.mcMax})`);
       continue;
     }
@@ -367,7 +368,6 @@ async function runMigrationScan(processToken) {
     enriched._migrationTo = event.toExchange;
     enriched._detectionMethod = event._detectionMethod;
     // External exchange migrations get higher base score (rarer, more alpha)
-    const isExternal = !['pump_amm', ''].includes(event.toExchange);
     enriched._score = isExternal ? 70 : 60;
 
     const tag = isExternal ? '🔗 EXTERNAL' : '🎯';
