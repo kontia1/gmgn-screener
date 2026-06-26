@@ -246,8 +246,8 @@ async function main() {
     const top10 = token.top_10_holder_rate || 0;
     if (top10 > 0 && top10 > (filters.maxTop10HolderRate || 1)) return;
 
-    // Score — baseScore murni, TANPA boost
-    const baseScore = scoreToken(token, ageMin).score;
+    // Score — baseScore murni, TANPA boost. Use _score if already set (migration events get base 60-70)
+    const baseScore = Math.max(token._score || 0, scoreToken(token, ageMin).score);
 
     // Per-source minScore
     const sourceMinScore = {

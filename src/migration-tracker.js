@@ -32,6 +32,7 @@ const DEFAULT_MIGRATION_CONFIG = {
 // ─── State ──────────────────────────────────────────────
 let previousSnapshot = new Map(); // address -> { migrated_pool_exchange, exchange, ... }
 let migrationScanning = false;
+let newExternalSeen = new Set(); // track addresses already flagged as new_external (per session)
 
 // ─── Helpers ────────────────────────────────────────────
 function loadSeen() {
@@ -234,7 +235,9 @@ function detectMigrations(currentTokens, config) {
     if (!prev) {
       // Token is NEW in snapshot. If already on external exchange, treat as migration event
       // (migrated before we first saw it — common for meteora/raydium migrations)
-      if (currentExchange && !BONDING_EXCHANGES.includes(currentExchange) && !['pump_amm'].includes(currentExchange)) {
+      // Only fire ONCE per address per session (newExternalSeen set)
+      if (currentExchange && !BONDING_EXCHANGES.includes(currentExchange) && !['pump_amm'].includes(currentExchange) && !newExternalSeen.has(addr)) {
+        newExternalSeen.add(addr);
         events.push({
           ...token,
           migrationEvent: true,
