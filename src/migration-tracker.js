@@ -193,6 +193,7 @@ async function enrichToken(token) {
     token.circulating_supply = parseFloat(price.circulating_supply) || 0;
     token.top_10_holder_rate = stat.top_10_holder_rate || token.top_10_holder_rate || 0;
     token.bundler_rate = stat.bundler_trader_amount_rate || token.bundler_rate || 0;
+    token.creation_timestamp = pool.creation_timestamp || token.creation_timestamp || 0;  // for age filter
     token.entrapment_ratio = stat.top_entrapment_trader_percentage || token.entrapment_ratio || 0;
     token.smart_degen_count = stat.smart_degen_count || token.smart_degen_count || 0;
 
@@ -312,6 +313,14 @@ async function runMigrationScan(processToken) {
     const top10 = enriched.top_10_holder_rate || event.top_10_holder_rate || 0;
     const holders = enriched.holder_count || 0;
     const isExternal = !['pump', 'pump_amm', ''].includes(enriched.exchange || event.exchange || '');
+
+    // Filter: token age — reject old tokens (>60 min = already migrated long ago)
+    const creationTs = enriched.creation_timestamp || event.creation_timestamp || 0;
+    const ageMin = creationTs > 0 ? (Date.now() / 1000 - creationTs) / 60 : 999999;
+    if (ageMin > 60) {
+      console.log(`[MIGRATION] ${sym} REJECTED: age=${Math.round(ageMin)}m (>60m = old migration)`);
+      continue;
+    }
 
     // Filter: top10 concentration (ALL tokens — high concentration = scam risk)
     if (top10 > 0.50) {
