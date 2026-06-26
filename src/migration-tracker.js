@@ -32,7 +32,6 @@ const DEFAULT_MIGRATION_CONFIG = {
 // ─── State ──────────────────────────────────────────────
 let previousSnapshot = new Map(); // address -> { migrated_pool_exchange, exchange, ... }
 let migrationScanning = false;
-let newExternalSeen = new Set(); // track addresses already flagged as new_external (per session)
 
 // ─── Helpers ────────────────────────────────────────────
 function loadSeen() {
@@ -233,19 +232,8 @@ function detectMigrations(currentTokens, config) {
     // Compare with previous snapshot
     const prev = previousSnapshot.get(addr);
     if (!prev) {
-      // Token is NEW in snapshot. If already on external exchange, treat as migration event
-      // (migrated before we first saw it — common for meteora/raydium migrations)
-      // Only fire ONCE per address per session (newExternalSeen set)
-      if (currentExchange && !BONDING_EXCHANGES.includes(currentExchange) && !['pump_amm'].includes(currentExchange) && !newExternalSeen.has(addr)) {
-        newExternalSeen.add(addr);
-        events.push({
-          ...token,
-          migrationEvent: true,
-          fromExchange: 'unknown',
-          toExchange: currentExchange,
-          _detectionMethod: 'new_external',
-        });
-      }
+      // Token is NEW in snapshot — store it, don't fire migration event
+      // (new_external was catching ALL external exchange tokens including old ones)
       continue;
     }
 
@@ -324,6 +312,19 @@ async function runMigrationScan(processToken) {
     const top10 = enriched.top_10_holder_rate || event.top_10_holder_rate || 0;
     const holders = enriched.holder_count || 0;
     const isExternal = !['pump', 'pump_amm', ''].includes(enriched.exchange || event.exchange || '');
+
+    // Filter: top10 concentration (ALL tokens — high concentration = scam risk)
+    if (top10 > 0.50) {
+      console.log(`[MIGRATION] ${sym} REJECTED: top10=${(top10 * 100).toFixed(0)}% (>50% = scam risk)`);
+      continue;
+    }
+
+    // Filter: liquidity sanity check — enriched liq must be > $100
+    // (Meteora tokens show $30K in trenches but $8 in token info = different pool = scam)
+    if (liq > 0 && liq < 100) {
+      console.log(`[MIGRATION] ${sym} REJECTED: liq=$${Math.round(liq)} (<$100 = dead/scam pool)`);
+      continue;
+    }
 
     // Filter: MC range (skip for external exchange — MC data unreliable for Meteora tokens)
     if (!isExternal && mc > 0 && (mc < config.mcMin || (config.mcMax && mc > config.mcMax))) {

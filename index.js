@@ -216,7 +216,6 @@ async function main() {
 
   // ─── SmartMoney + KOL Tracker Processor ────────────────
   function trackerProcessToken(token, source) {
-    console.log(`[TRACKER/${source}] ${token.symbol} ENTERED (addr=${token.address?.slice(0,8)}... score=${token._score})`);
     const cfg = getAutoConfig();
     const globalFilters = getActiveFilters();
     // Migration source uses its own filters, not global custom filters
