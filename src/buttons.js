@@ -938,9 +938,31 @@ async function handlePendingInput(chatId, text) {
       if (parts.length === 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
         updateAutoConfig({ migrationTracker: { ...cfg.migrationTracker, mcMin: parts[0], mcMax: parts[1] } });
         pendingInputs.delete(chatId);
-        // Re-trigger edit
-        const editCb = { data: 'tracker_edit_migration', message: { message_id: msgId }, from: { id: chatId } };
-        return;
+        // Re-show migration settings (same as other fields below)
+        const t2 = getAutoConfig().migrationTracker;
+        const lines2 = [
+          `🚀 <b>Migration Tracker Settings</b>`, ``,
+          `Detects tokens that JUST migrated from bonding curve to AMM`, ``,
+          `Status: ${t2.enabled ? '✅ ON' : '❌ OFF'}`,
+          `Interval: ${t2.intervalSec || 90}s`,
+          `MC Range: $${fmtMc(t2.mcMin || 5000)} - $${fmtMc(t2.mcMax || 200000)}`,
+          `Min Liquidity: $${(t2.minLiquidity || 5000).toLocaleString()}`,
+          `Max Bundler: ${((t2.maxBundlerRate || 0.30) * 100).toFixed(0)}%`,
+          `Max Top10: ${((t2.maxTop10HolderRate || 0.40) * 100).toFixed(0)}%`,
+          `Min Holders: ${t2.minHolder || 20}`,
+          `Min Score: ${t2.minScore || 35}`,
+        ];
+        await tgApi('sendMessage', {
+          chat_id: chatId, text: lines2.join('\n'), parse_mode: 'HTML',
+          reply_markup: { inline_keyboard: [
+            [{ text: `${t2.enabled ? '🔴 OFF' : '🟢 ON'}`, callback_data: 'tracker_toggle_migration' },
+             { text: `⏱ ${t2.intervalSec || 90}s`, callback_data: 'tracker_ask_interval_migration' }],
+            [{ text: `💰 MC: $${fmtMc(t2.mcMin || 5000)}-${fmtMc(t2.mcMax || 200000)}`, callback_data: 'tracker_ask_mc_migration' },
+             { text: `💧 Liq: $${(t2.minLiquidity || 5000).toLocaleString()}`, callback_data: 'tracker_ask_liq_migration' }],
+            [{ text: '⬅️ Config', callback_data: 'menu_config' }],
+          ]}
+        });
+        return true;
       }
       return; // invalid format
     }

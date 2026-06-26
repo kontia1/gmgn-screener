@@ -287,6 +287,11 @@ async function runMigrationScan(processToken) {
     // Mark as seen
     seen[seenKey] = Date.now();
     setGlobalDedup(addr, 'migration');
+    // Cleanup old entries before saving
+    const now = Date.now();
+    for (const [k, v] of Object.entries(seen)) {
+      if (now - v > seenTtlSec * 1000) delete seen[k];
+    }
     saveSeen(seen);
 
     // Enrich for display

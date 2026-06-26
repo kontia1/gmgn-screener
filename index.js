@@ -250,7 +250,13 @@ async function main() {
     }
 
     // ── Re-check enabled (race condition fix) ──
-    const reCheck = getTrackerConfig()[source];
+    let reCheck;
+    if (source === 'migration') {
+      const migCfg = getMigrationConfig();
+      reCheck = { enabled: migCfg.enabled };
+    } else {
+      reCheck = getTrackerConfig()[source];
+    }
     if (!reCheck?.enabled) {
       console.log(`[TRACKER/${source}] ${token.symbol} skipped — disabled during processing`);
       return;
@@ -348,7 +354,13 @@ async function main() {
     const buyDelay = Math.random() * 2000 + 1000;
     setTimeout(() => {
       // Final re-check before buy
-      const finalCheck = getTrackerConfig()[source];
+      let finalCheck;
+      if (source === 'migration') {
+        const migCfg = getMigrationConfig();
+        finalCheck = { enabled: migCfg.enabled };
+      } else {
+        finalCheck = getTrackerConfig()[source];
+      }
       if (!finalCheck?.enabled) {
         console.log(`[TRACKER/${source}] ${token.symbol} buy cancelled — disabled before execution`);
         return;

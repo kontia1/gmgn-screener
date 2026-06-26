@@ -556,7 +556,9 @@ async function autoBuy(tokenData) {
     const errLines = e.message.split('\n');
     const shortErr = errLines[0].slice(0, 120);
     const detail = errLines.length > 1 ? '\n' + errLines.slice(1).join('\n').slice(0, 300) : '';
-    await sendTelegram(`❌ Auto-Buy failed: ${symbol}\n${shortErr}${detail}`);
+    // Escape HTML special chars to prevent Telegram parse failure
+    const escHtml = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    await sendTelegram(`❌ Auto-Buy failed: ${escHtml(symbol)}\n${escHtml(shortErr)}${escHtml(detail)}`);
   }
   return null;
 }
