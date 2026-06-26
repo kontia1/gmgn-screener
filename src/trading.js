@@ -3,12 +3,15 @@
  * SOL ↔ SPL Token
  * Uses Jupiter API key for premium routing + higher rate limits
  */
-const { Transaction, VersionedTransaction } = require('@solana/web3.js');
+const { Transaction, VersionedTransaction, PublicKey } = require('@solana/web3.js');
 const { getKeypair, getConnection } = require('./wallet');
+const { OnlinePumpAmmSdk, PUMP_AMM_SDK, canonicalPumpPoolPda } = require('@pump-fun/pump-swap-sdk');
+const BN = require('bn.js');
 
 const JUPITER_API = process.env.JUPITER_API_URL || 'https://api.jup.ag/swap/v1';
 const JUPITER_KEY = process.env.JUPITER_API_KEY || '';
 const SOL_MINT = 'So11111111111111111111111111111111111111112';
+const PUMP_AMM_PROGRAM = 'pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA';
 
 // Build headers with API key if available
 function jupHeaders(extra = {}) {
@@ -86,121 +89,111 @@ async function getSwapTx(quote, userPublicKey, priorityFeeLamports = 50000) {
   }
 }
 
-// ─── PumpPortal Trade-Local Fallback ─────────────────────────
-async function pumpPortalBuy(tokenMint, solAmount, slippageBps = 300) {
+// ─── PumpSwap SDK Fallback (Official @pump-fun/pump-swap-sdk) ───
+
+// Find pAMM pool for a token (canonical PDA)
+async function findPumpPool(conn, tokenMint) {
+  const mint = new PublicKey(tokenMint);
+  const pda = canonicalPumpPoolPda(mint);
+  const info = await conn.getAccountInfo(pda);
+  if (info && info.owner.toBase58() === PUMP_AMM_PROGRAM) return pda;
+  return null;
+}
+
+// PumpSwap Buy: sell SOL (base) → get token (quote)
+// Pool layout: base=SOL, quote=Token
+async function pumpSwapBuy(tokenMint, solAmount, slippageBps = 300) {
   const keypair = getKeypair('default');
   const conn = getConnection();
 
-  console.log(`[TRADE] PumpPortal buy ${tokenMint} with ${solAmount} SOL (pool: auto)`);
+  console.log(`[TRADE] PumpSwap SDK buy ${tokenMint} with ${solAmount} SOL`);
 
-  const resp = await fetch('https://pumpportal.fun/api/trade-local', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      publicKey: keypair.publicKey.toBase58(),
-      action: 'buy',
-      mint: tokenMint,
-      denominatedInSol: true,
-      amount: solAmount,
-      slippage: slippageBps / 100, // PumpPortal uses percent, not bps
-      priorityFee: 0.0005,
-      pool: 'auto', // routes to bonding curve OR PumpSwap AMM
-    }),
-  });
+  const poolKey = await findPumpPool(conn, tokenMint);
+  if (!poolKey) throw new Error('PumpSwap pool not found for this token');
 
-  if (!resp.ok) {
-    const errText = await resp.text().catch(() => '');
-    throw new Error(`PumpPortal API error ${resp.status}: ${errText.slice(0, 100)}`);
-  }
+  const online = new OnlinePumpAmmSdk(conn);
+  const offline = PUMP_AMM_SDK;
 
-  const txBuf = Buffer.from(await resp.arrayBuffer());
-  const tx = VersionedTransaction.deserialize(txBuf);
-  tx.sign([keypair]);
+  const swapState = await online.swapSolanaStateNoPool(poolKey, keypair.publicKey);
+  const solLamports = new BN(Math.floor(solAmount * 1e9));
+  const slippage = slippageBps / 10000;
 
-  const sig = await conn.sendTransaction(tx, {
-    skipPreflight: false,
-    maxRetries: 3,
-  });
-  console.log(`[TRADE] PumpPortal TX sent: ${sig}`);
+  const ixs = await offline.sellBaseInput(swapState, solLamports, slippage);
+  console.log(`[TRADE] PumpSwap SDK: ${ixs.length} instructions`);
 
-  // Confirm
+  const { blockhash } = await conn.getLatestBlockhash('confirmed');
+  const tx = new Transaction();
+  tx.recentBlockhash = blockhash;
+  tx.feePayer = keypair.publicKey;
+  for (const ix of ixs) tx.add(ix);
+  tx.sign(keypair);
+
+  const sig = await conn.sendRawTransaction(tx.serialize(), { skipPreflight: true, maxRetries: 2 });
+  console.log(`[TRADE] PumpSwap buy TX: ${sig}`);
+
   const status = await Promise.race([
     conn.confirmTransaction(sig, 'confirmed'),
-    new Promise((_, rej) =>
-      setTimeout(() => rej(new Error('confirmTransaction timeout (60s)')), 60_000)
-    )
+    new Promise((_, rej) => setTimeout(() => rej(new Error('confirmTransaction timeout (60s)')), 60_000)),
   ]);
 
   const err = status?.err || status?.value?.err;
-  if (err) {
-    throw new Error(`PumpPortal TX failed on-chain: ${JSON.stringify(err)}`);
-  }
+  if (err) throw new Error(`PumpSwap buy TX failed: ${JSON.stringify(err)}`);
+
+  const details = await conn.getTransaction(sig, { maxSupportedTransactionVersion: 0 });
+  if (details?.meta?.err) throw new Error(`PumpSwap buy instruction error: ${JSON.stringify(details.meta.err)}`);
 
   return {
-    success: true,
-    signature: sig,
-    inputAmount: solAmount,
-    outputAmount: '0', // PumpPortal doesn't return outAmount
-    decimals: 6,
-    source: 'pumpportal',
+    success: true, signature: sig, inputAmount: solAmount,
+    outputAmount: '0', decimals: 6, source: 'pumpswap-sdk',
+    explorer: `https://solscan.io/tx/${sig}`,
   };
 }
 
-// ─── PumpPortal Sell Fallback ────────────────────────────────
-async function pumpPortalSell(tokenMint, tokenAmount, decimals, slippageBps = 300) {
+// PumpSwap Sell: sell token (quote) → get SOL (base)
+async function pumpSwapSell(tokenMint, tokenAmount, decimals, slippageBps = 300) {
   const keypair = getKeypair('default');
   const conn = getConnection();
 
-  console.log(`[TRADE] PumpPortal sell ${tokenAmount} of ${tokenMint} (pool: auto)`);
+  console.log(`[TRADE] PumpSwap SDK sell ${tokenAmount} of ${tokenMint}`);
 
-  const resp = await fetch('https://pumpportal.fun/api/trade-local', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      publicKey: keypair.publicKey.toBase58(),
-      action: 'sell',
-      mint: tokenMint,
-      denominatedInSol: false,
-      amount: tokenAmount,
-      slippage: slippageBps / 100,
-      priorityFee: 0.0005,
-      pool: 'auto',
-    }),
-  });
+  const poolKey = await findPumpPool(conn, tokenMint);
+  if (!poolKey) throw new Error('PumpSwap pool not found for this token');
 
-  if (!resp.ok) {
-    const errText = await resp.text().catch(() => '');
-    throw new Error(`PumpPortal sell API error ${resp.status}: ${errText.slice(0, 100)}`);
-  }
+  const online = new OnlinePumpAmmSdk(conn);
+  const offline = PUMP_AMM_SDK;
 
-  const txBuf = Buffer.from(await resp.arrayBuffer());
-  const tx = VersionedTransaction.deserialize(txBuf);
-  tx.sign([keypair]);
+  const swapState = await online.swapSolanaStateNoPool(poolKey, keypair.publicKey);
+  const rawAmount = new BN(Math.round(tokenAmount * Math.pow(10, decimals)));
+  const slippage = slippageBps / 10000;
 
-  const sig = await conn.sendTransaction(tx, {
-    skipPreflight: false,
-    maxRetries: 3,
-  });
-  console.log(`[TRADE] PumpPortal sell TX sent: ${sig}`);
+  const ixs = await offline.sellQuoteInput(swapState, rawAmount, slippage);
+  console.log(`[TRADE] PumpSwap SDK: ${ixs.length} instructions`);
+
+  const { blockhash } = await conn.getLatestBlockhash('confirmed');
+  const tx = new Transaction();
+  tx.recentBlockhash = blockhash;
+  tx.feePayer = keypair.publicKey;
+  for (const ix of ixs) tx.add(ix);
+  tx.sign(keypair);
+
+  const sig = await conn.sendRawTransaction(tx.serialize(), { skipPreflight: true, maxRetries: 2 });
+  console.log(`[TRADE] PumpSwap sell TX: ${sig}`);
 
   const status = await Promise.race([
     conn.confirmTransaction(sig, 'confirmed'),
-    new Promise((_, rej) =>
-      setTimeout(() => rej(new Error('confirmTransaction timeout (60s)')), 60_000)
-    )
+    new Promise((_, rej) => setTimeout(() => rej(new Error('confirmTransaction timeout (60s)')), 60_000)),
   ]);
 
   const err = status?.err || status?.value?.err;
-  if (err) {
-    throw new Error(`PumpPortal sell TX failed: ${JSON.stringify(err)}`);
-  }
+  if (err) throw new Error(`PumpSwap sell TX failed: ${JSON.stringify(err)}`);
+
+  const details = await conn.getTransaction(sig, { maxSupportedTransactionVersion: 0 });
+  if (details?.meta?.err) throw new Error(`PumpSwap sell instruction error: ${JSON.stringify(details.meta.err)}`);
 
   return {
-    success: true,
-    signature: sig,
-    inputAmount: tokenAmount,
-    outputSol: 0,
-    source: 'pumpportal',
+    success: true, signature: sig, inputAmount: tokenAmount,
+    outputSol: 0, source: 'pumpswap-sdk',
+    explorer: `https://solscan.io/tx/${sig}`,
   };
 }
 
@@ -216,12 +209,12 @@ async function buyToken(tokenMint, solAmount, walletLabel = 'default', slippageB
       const { pumpFunBuy, isOnBondingCurve } = require('./pumpfun');
       const onCurve = await isOnBondingCurve(tokenMint);
       if (!onCurve) {
-        console.log(`[TRADE] Token not on bonding curve (migrated to AMM), trying PumpPortal Trade-Local...`);
+        console.log(`[TRADE] Token not on bonding curve (migrated to AMM), trying PumpSwap SDK...`);
         try {
-          return await pumpPortalBuy(tokenMint, solAmount, slippageBps);
-        } catch (ppErr) {
-          console.log(`[TRADE] PumpPortal also failed: ${ppErr.message}`);
-          throw jupErr; // original error
+          return await pumpSwapBuy(tokenMint, solAmount, slippageBps);
+        } catch (psErr) {
+          console.log(`[TRADE] PumpSwap SDK also failed: ${psErr.message}`);
+          throw jupErr;
         }
       }
       return await pumpFunBuy(tokenMint, solAmount, slippageBps);
@@ -308,12 +301,12 @@ async function _jupiterBuy(tokenMint, solAmount, walletLabel, slippageBps, _isRe
       try {
         sig = await conn.sendTransaction(freshTx, { skipPreflight: false, maxRetries: 3 });
       } catch (freshErr) {
-        // This route also failed — try PumpPortal as last resort
-        console.log(`[TRADE] Fresh route also failed: ${freshErr.message?.slice(0,80)}, trying PumpPortal...`);
+        // This route also failed — try PumpSwap SDK as last resort
+        console.log(`[TRADE] Fresh route also failed: ${freshErr.message?.slice(0,80)}, trying PumpSwap SDK...`);
         try {
-          return await pumpPortalBuy(tokenMint, solAmount, slippageBps);
-        } catch (ppErr) {
-          console.log(`[TRADE] PumpPortal also failed: ${ppErr.message}`);
+          return await pumpSwapBuy(tokenMint, solAmount, slippageBps);
+        } catch (psErr) {
+          console.log(`[TRADE] PumpSwap SDK also failed: ${psErr.message}`);
           throw new Error('Token untradeable — all routes failed');
         }
       }
@@ -407,8 +400,8 @@ async function sellToken(tokenMint, tokenAmount, decimals, walletLabel = 'defaul
   } catch (sellErr) {
     const errStr = sellErr.message || '';
     if (errStr.includes('pAMM') || errStr.includes('account required')) {
-      console.log(`[TRADE] Sell failed (pAMM broken), trying PumpPortal...`);
-      return await pumpPortalSell(tokenMint, tokenAmount, decimals, slippageBps);
+      console.log(`[TRADE] Sell failed (pAMM broken), trying PumpSwap SDK...`);
+      return await pumpSwapSell(tokenMint, tokenAmount, decimals, slippageBps);
     }
     throw sellErr;
   }
