@@ -188,6 +188,9 @@ async function enrichToken(token) {
     token.liquidity = parseFloat(pool.liquidity) || token.liquidity || 0;
     token.holder_count = price.holder_count || token.holder_count || 0;
     token.exchange = pool.exchange || token.exchange || '';  // update exchange from token info (most reliable)
+    token.market_cap = parseFloat(price.market_cap) || token.market_cap || 0;
+    token.price_usd = parseFloat(price.price) || 0;
+    token.circulating_supply = parseFloat(price.circulating_supply) || 0;
     token.top_10_holder_rate = stat.top_10_holder_rate || token.top_10_holder_rate || 0;
     token.bundler_rate = stat.bundler_trader_amount_rate || token.bundler_rate || 0;
     token.entrapment_ratio = stat.top_entrapment_trader_percentage || token.entrapment_ratio || 0;
@@ -308,39 +311,41 @@ async function runMigrationScan(processToken) {
       continue;
     }
 
+    // Enrich FIRST — raw trending/signal data has unreliable MC (FDV not circulating)
+    const enriched = await enrichToken(event);
+
+    // Use enriched data for all filters
+    const mc = enriched.market_cap || (enriched.price_usd || 0) * (enriched.circulating_supply || 0) || event.market_cap || event.fdv || 0;
+    const liq = enriched.liquidity || 0;
+    const bundler = enriched.bundler_rate || event.bundler_rate || 0;
+    const top10 = enriched.top_10_holder_rate || event.top_10_holder_rate || 0;
+    const holders = enriched.holder_count || 0;
+
     // Filter: MC range
-    const mc = event.market_cap || event.fdv || 0;
     if (mc < config.mcMin || (config.mcMax && mc > config.mcMax)) {
       console.log(`[MIGRATION] ${sym} REJECTED: mc=$${Math.round(mc)} (min=${config.mcMin} max=${config.mcMax})`);
       continue;
     }
 
     // Filter: bundler
-    const bundler = event.bundler_rate || 0;
     if (config.maxBundlerRate && bundler > config.maxBundlerRate) {
       console.log(`[MIGRATION] ${sym} REJECTED: bundler=${(bundler * 100).toFixed(0)}% (max=${(config.maxBundlerRate * 100).toFixed(0)}%)`);
       continue;
     }
 
     // Filter: top10
-    const top10 = event.top_10_holder_rate || 0;
     if (config.maxTop10HolderRate && top10 > config.maxTop10HolderRate) {
       console.log(`[MIGRATION] ${sym} REJECTED: top10=${(top10 * 100).toFixed(0)}% (max=${(config.maxTop10HolderRate * 100).toFixed(0)}%)`);
       continue;
     }
 
-    // Enrich with token info (volume, liq, holders from GMGN API)
-    const enriched = await enrichToken(event);
-
     // Filter: liquidity
-    const liq = enriched.liquidity || 0;
     if (config.minLiquidity && liq < config.minLiquidity) {
       console.log(`[MIGRATION] ${sym} REJECTED: liq=$${Math.round(liq)} (min=${config.minLiquidity})`);
       continue;
     }
 
     // Filter: holders
-    const holders = enriched.holder_count || 0;
     if (config.minHolder && holders < config.minHolder) {
       console.log(`[MIGRATION] ${sym} REJECTED: holders=${holders} (min=${config.minHolder})`);
       continue;
