@@ -128,7 +128,14 @@ async function pumpSdkBuy(tokenMint, solAmount, slippageBps = 300) {
 
     // Migrated to AMM — use pump-swap-sdk
     console.log(`[TRADE] Bonding curve not found (migrated), using PumpSwap AMM...`);
-    return await pumpSwapBuy(tokenMint, solAmount, slippageBps);
+    try {
+      return await pumpSwapBuy(tokenMint, solAmount, slippageBps);
+    } catch (ammErr) {
+      if (ammErr.message?.includes('PumpSwap AMM pool not found')) {
+        throw new Error('Token not on Pump.fun ecosystem (likely Meteora/other DEX)');
+      }
+      throw ammErr;
+    }
   }
 }
 
@@ -166,7 +173,14 @@ async function pumpSdkSell(tokenMint, tokenAmount, decimals, slippageBps = 300) 
     if (!bcErr.message?.includes('Bonding curve account not found')) throw bcErr;
 
     console.log(`[TRADE] Bonding curve not found (migrated), using PumpSwap AMM...`);
-    return await pumpSwapSell(tokenMint, tokenAmount, decimals, slippageBps);
+    try {
+      return await pumpSwapSell(tokenMint, tokenAmount, decimals, slippageBps);
+    } catch (ammErr) {
+      if (ammErr.message?.includes('PumpSwap AMM pool not found')) {
+        throw new Error('Token not on Pump.fun ecosystem (likely Meteora/other DEX)');
+      }
+      throw ammErr;
+    }
   }
 }
 
