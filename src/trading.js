@@ -150,7 +150,7 @@ async function pumpSdkBuy(tokenMint, solAmount, slippageBps = 300) {
     return await pumpSwapBuy(tokenMint, solAmount, slippageBps);
   } catch (ammErr) {
     if (ammErr.message?.includes('PumpSwap AMM pool not found')) {
-      throw new Error('Token not on Pump.fun ecosystem (likely Meteora/other DEX)');
+      throw new Error(`Not on Pump.fun (no bonding curve + no AMM pool) | ${ammErr.message}`);
     }
     throw ammErr;
   }
@@ -214,7 +214,7 @@ async function pumpSdkSell(tokenMint, tokenAmount, decimals, slippageBps = 300) 
     return await pumpSwapSell(tokenMint, tokenAmount, decimals, slippageBps);
   } catch (ammErr) {
     if (ammErr.message?.includes('PumpSwap AMM pool not found')) {
-      throw new Error('Token not on Pump.fun ecosystem (likely Meteora/other DEX)');
+      throw new Error(`Not on Pump.fun (no bonding curve + no AMM pool) | ${ammErr.message}`);
     }
     throw ammErr;
   }
@@ -231,7 +231,9 @@ async function pumpSwapBuy(tokenMint, solAmount, slippageBps = 300) {
   let info = await conn.getAccountInfo(poolKey);
   if (!info || info.owner.toBase58() !== PUMP_AMM_PROGRAM) {
     // Non-canonical pool — need to find via getProgramAccounts or fail
-    throw new Error('PumpSwap AMM pool not found');
+    const ownerInfo = info ? info.owner.toBase58() : 'null (account not found)';
+    const lamports = info ? info.lamports : 0;
+    throw new Error(`PumpSwap AMM pool not found | pool=${poolKey.toBase58()} owner=${ownerInfo} lamports=${lamports}`);
   }
 
   const ammOnline = new OnlinePumpAmmSdk(conn);
@@ -255,7 +257,9 @@ async function pumpSwapSell(tokenMint, tokenAmount, decimals, slippageBps = 300)
   let poolKey = canonicalPumpPoolPda(mint);
   let info = await conn.getAccountInfo(poolKey);
   if (!info || info.owner.toBase58() !== PUMP_AMM_PROGRAM) {
-    throw new Error('PumpSwap AMM pool not found');
+    const ownerInfo = info ? info.owner.toBase58() : 'null (account not found)';
+    const lamports = info ? info.lamports : 0;
+    throw new Error(`PumpSwap AMM pool not found | pool=${poolKey.toBase58()} owner=${ownerInfo} lamports=${lamports}`);
   }
 
   const ammOnline = new OnlinePumpAmmSdk(conn);
@@ -393,12 +397,21 @@ async function _jupiterBuy(tokenMint, solAmount, walletLabel, slippageBps, _isRe
         sig = await conn.sendTransaction(freshTx, { skipPreflight: false, maxRetries: 3 });
       } catch (freshErr) {
         // This route also failed — try Pump.fun SDK as last resort
-        console.log(`[TRADE] Fresh route also failed: ${freshErr.message?.slice(0,80)}, trying Pump.fun SDK...`);
+        const freshErrStr = freshErr.message?.slice(0,80) || 'unknown';
+        console.log(`[TRADE] Fresh route also failed: ${freshErrStr}, trying Pump.fun SDK...`);
         try {
           return await pumpSdkBuy(tokenMint, solAmount, slippageBps);
         } catch (psErr) {
-          console.log(`[TRADE] Pump.fun SDK also failed: ${psErr.message}`);
-          throw new Error('Token untradeable — all routes failed');
+          const psErrDetail = psErr.message || 'unknown';
+          console.log(`[TRADE] Pump.fun SDK also failed: ${psErrDetail}`);
+          // Build detailed error for Telegram notification
+          const routeLabels = (freshQuote?.routePlan || []).map(r => r?.swapInfo?.label || '?').join('→');
+          const detail = [
+            `Routes tried: Jupiter(${routeLabels}) → Pump.fun SDK`,
+            `Jupiter err: ${sendErr.message?.slice(0,60) || 'simulation failed'}`,
+            `PumpSDK err: ${psErrDetail.slice(0,100)}`,
+          ].join('\n');
+          throw new Error(`Token untradeable\n${detail}`);
         }
       }
     }
