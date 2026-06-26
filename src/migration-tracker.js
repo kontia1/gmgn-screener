@@ -63,80 +63,107 @@ function getMigrationConfig() {
 // ─── Fetch tokens from multiple GMGN sources ────────────
 async function fetchAllSources() {
   const allTokens = new Map(); // address -> token (dedup by address)
+  const startTime = Date.now();
 
   // Source 1: GMGN Trending (50 tokens)
   try {
-    const { stdout } = await execAsync(
+    const t0 = Date.now();
+    const { stdout, stderr } = await execAsync(
       'gmgn-cli market trending --chain sol --interval 1h --limit 50 --raw',
       { timeout: 15000 }
     );
+    const elapsed = Date.now() - t0;
     const data = JSON.parse(stdout.replace(/\x00/g, ''));
     const tokens = data?.data?.rank || [];
     for (const t of tokens) {
       if (t.address) allTokens.set(t.address, { ...t, _source: 'trending' });
     }
-    console.log(`[MIGRATION] Trending: ${tokens.length} tokens`);
+    const rateLimited = (stderr || '').includes('429') || (stderr || '').includes('rate') || (stderr || '').includes('limit');
+    console.log(`[MIGRATION] Trending: ${tokens.length} tokens (${elapsed}ms)${rateLimited ? ' ⚠️ RATE LIMITED' : ''}`);
+    if (stderr) console.log(`[MIGRATION] Trending stderr: ${stderr.slice(0, 200)}`);
   } catch (e) {
-    console.error('[MIGRATION] Fetch trending failed:', e.message?.slice(0, 80));
+    const isRateLimit = e.message?.includes('429') || e.message?.includes('rate') || e.stderr?.includes('429');
+    console.error(`[MIGRATION] Fetch trending failed: ${e.message?.slice(0, 80)}${isRateLimit ? ' ⚠️ RATE LIMITED' : ''}`);
   }
 
   // Source 2: GMGN Signal (multiple signal types for broader coverage)
   for (const sigType of [1, 3, 4, 6]) { // Price Spike, Volume Spike, Large Buy, SM Buy
     try {
-      const { stdout } = await execAsync(
+      const t0 = Date.now();
+      const { stdout, stderr } = await execAsync(
         `gmgn-cli market signal --chain sol --signal-type ${sigType} --mc-min 5000 --mc-max 500000 --raw`,
         { timeout: 15000 }
       );
+      const elapsed = Date.now() - t0;
       const data = JSON.parse(stdout.replace(/\x00/g, ''));
-      const tokens = data?.data || [];
+      const tokens = Array.isArray(data) ? data : (data?.data || []);
+      let newCount = 0;
       for (const t of tokens) {
         if (t.address && !allTokens.has(t.address)) {
           allTokens.set(t.address, { ...t, _source: `signal_${sigType}` });
+          newCount++;
         }
       }
+      const rateLimited = (stderr || '').includes('429') || (stderr || '').includes('rate') || (stderr || '').includes('limit');
+      console.log(`[MIGRATION] Signal type ${sigType}: ${tokens.length} tokens, ${newCount} new (${elapsed}ms)${rateLimited ? ' ⚠️ RATE LIMITED' : ''}`);
+      if (rateLimited && stderr) console.log(`[MIGRATION] Signal ${sigType} stderr: ${stderr.slice(0, 200)}`);
     } catch (e) {
-      // Silent fail per signal type
+      const isRateLimit = e.message?.includes('429') || e.message?.includes('rate') || e.stderr?.includes('429');
+      console.error(`[MIGRATION] Signal type ${sigType} failed: ${e.message?.slice(0, 80)}${isRateLimit ? ' ⚠️ RATE LIMITED' : ''}`);
     }
+    // Small delay between signal calls to avoid rate limit
+    await new Promise(r => setTimeout(r, 500));
   }
   console.log(`[MIGRATION] After signal: ${allTokens.size} total unique tokens`);
 
   // Source 3: GMGN Trenches near_completion (almost graduated)
   try {
-    const { stdout } = await execAsync(
+    const t0 = Date.now();
+    const { stdout, stderr } = await execAsync(
       'gmgn-cli market trenches --chain sol --type near_completion --limit 20 --raw',
       { timeout: 15000 }
     );
+    const elapsed = Date.now() - t0;
     const data = JSON.parse(stdout.replace(/\x00/g, ''));
-    const tokens = data?.new_creation || data?.data?.new_creation || [];
+    const tokens = data?.new_creation || data?.data?.new_creation || data?.data || [];
     for (const t of tokens) {
       if (t.address && !allTokens.has(t.address)) {
         allTokens.set(t.address, { ...t, _source: 'trenches_near' });
       }
     }
-    console.log(`[MIGRATION] Trenches near_completion: ${tokens.length} tokens`);
+    const rateLimited = (stderr || '').includes('429') || (stderr || '').includes('rate') || (stderr || '').includes('limit');
+    console.log(`[MIGRATION] Trenches near_completion: ${tokens.length} tokens (${elapsed}ms)${rateLimited ? ' ⚠️ RATE LIMITED' : ''}`);
+    if (stderr) console.log(`[MIGRATION] Trenches near stderr: ${stderr.slice(0, 200)}`);
   } catch (e) {
-    console.error('[MIGRATION] Fetch trenches near failed:', e.message?.slice(0, 80));
+    const isRateLimit = e.message?.includes('429') || e.message?.includes('rate') || e.stderr?.includes('429');
+    console.error(`[MIGRATION] Fetch trenches near failed: ${e.message?.slice(0, 80)}${isRateLimit ? ' ⚠️ RATE LIMITED' : ''}`);
   }
 
   // Source 4: GMGN Trenches completed (just graduated)
   try {
-    const { stdout } = await execAsync(
+    const t0 = Date.now();
+    const { stdout, stderr } = await execAsync(
       'gmgn-cli market trenches --chain sol --type completed --limit 20 --raw',
       { timeout: 15000 }
     );
+    const elapsed = Date.now() - t0;
     const data = JSON.parse(stdout.replace(/\x00/g, ''));
-    const tokens = data?.new_creation || data?.data?.new_creation || [];
+    const tokens = data?.completed || data?.data?.completed || data?.data || [];
     for (const t of tokens) {
       if (t.address && !allTokens.has(t.address)) {
         allTokens.set(t.address, { ...t, _source: 'trenches_completed' });
       }
     }
-    console.log(`[MIGRATION] Trenches completed: ${tokens.length} tokens`);
+    const rateLimited = (stderr || '').includes('429') || (stderr || '').includes('rate') || (stderr || '').includes('limit');
+    console.log(`[MIGRATION] Trenches completed: ${tokens.length} tokens (${elapsed}ms)${rateLimited ? ' ⚠️ RATE LIMITED' : ''}`);
+    if (stderr) console.log(`[MIGRATION] Trenches completed stderr: ${stderr.slice(0, 200)}`);
   } catch (e) {
-    console.error('[MIGRATION] Fetch trenches completed failed:', e.message?.slice(0, 80));
+    const isRateLimit = e.message?.includes('429') || e.message?.includes('rate') || e.stderr?.includes('429');
+    console.error(`[MIGRATION] Fetch trenches completed failed: ${e.message?.slice(0, 80)}${isRateLimit ? ' ⚠️ RATE LIMITED' : ''}`);
   }
 
-  console.log(`[MIGRATION] Total unique tokens from all sources: ${allTokens.size}`);
+  const totalElapsed = Date.now() - startTime;
+  console.log(`[MIGRATION] Total: ${allTokens.size} unique tokens in ${totalElapsed}ms`);
   return Array.from(allTokens.values());
 }
 
