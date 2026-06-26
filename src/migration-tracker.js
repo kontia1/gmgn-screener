@@ -18,7 +18,7 @@ const MIGRATION_SEEN_FILE = path.join(OUTPUT_DIR, 'gmgn-seen-migration.json');
 // ─── Default Config ─────────────────────────────────────
 const DEFAULT_MIGRATION_CONFIG = {
   enabled: false,           // OFF by default — user enables via /config
-  intervalSec: 60,          // poll every 60s
+  intervalSec: 90,          // poll every 90s (4 sources takes ~10-15s)
   mcMin: 5000,              // min MC $5K
   mcMax: 200000,            // max MC $200K
   minLiquidity: 5000,       // min liquidity $5K
@@ -60,19 +60,84 @@ function getMigrationConfig() {
   }
 }
 
-// ─── Fetch GMGN Trending ────────────────────────────────
-async function fetchTrending() {
+// ─── Fetch tokens from multiple GMGN sources ────────────
+async function fetchAllSources() {
+  const allTokens = new Map(); // address -> token (dedup by address)
+
+  // Source 1: GMGN Trending (50 tokens)
   try {
     const { stdout } = await execAsync(
       'gmgn-cli market trending --chain sol --interval 1h --limit 50 --raw',
       { timeout: 15000 }
     );
     const data = JSON.parse(stdout.replace(/\x00/g, ''));
-    return data?.data?.rank || [];
+    const tokens = data?.data?.rank || [];
+    for (const t of tokens) {
+      if (t.address) allTokens.set(t.address, { ...t, _source: 'trending' });
+    }
+    console.log(`[MIGRATION] Trending: ${tokens.length} tokens`);
   } catch (e) {
     console.error('[MIGRATION] Fetch trending failed:', e.message?.slice(0, 80));
-    return [];
   }
+
+  // Source 2: GMGN Signal (multiple signal types for broader coverage)
+  for (const sigType of [1, 3, 4, 6]) { // Price Spike, Volume Spike, Large Buy, SM Buy
+    try {
+      const { stdout } = await execAsync(
+        `gmgn-cli market signal --chain sol --signal-type ${sigType} --mc-min 5000 --mc-max 500000 --raw`,
+        { timeout: 15000 }
+      );
+      const data = JSON.parse(stdout.replace(/\x00/g, ''));
+      const tokens = data?.data || [];
+      for (const t of tokens) {
+        if (t.address && !allTokens.has(t.address)) {
+          allTokens.set(t.address, { ...t, _source: `signal_${sigType}` });
+        }
+      }
+    } catch (e) {
+      // Silent fail per signal type
+    }
+  }
+  console.log(`[MIGRATION] After signal: ${allTokens.size} total unique tokens`);
+
+  // Source 3: GMGN Trenches near_completion (almost graduated)
+  try {
+    const { stdout } = await execAsync(
+      'gmgn-cli market trenches --chain sol --type near_completion --limit 20 --raw',
+      { timeout: 15000 }
+    );
+    const data = JSON.parse(stdout.replace(/\x00/g, ''));
+    const tokens = data?.new_creation || data?.data?.new_creation || [];
+    for (const t of tokens) {
+      if (t.address && !allTokens.has(t.address)) {
+        allTokens.set(t.address, { ...t, _source: 'trenches_near' });
+      }
+    }
+    console.log(`[MIGRATION] Trenches near_completion: ${tokens.length} tokens`);
+  } catch (e) {
+    console.error('[MIGRATION] Fetch trenches near failed:', e.message?.slice(0, 80));
+  }
+
+  // Source 4: GMGN Trenches completed (just graduated)
+  try {
+    const { stdout } = await execAsync(
+      'gmgn-cli market trenches --chain sol --type completed --limit 20 --raw',
+      { timeout: 15000 }
+    );
+    const data = JSON.parse(stdout.replace(/\x00/g, ''));
+    const tokens = data?.new_creation || data?.data?.new_creation || [];
+    for (const t of tokens) {
+      if (t.address && !allTokens.has(t.address)) {
+        allTokens.set(t.address, { ...t, _source: 'trenches_completed' });
+      }
+    }
+    console.log(`[MIGRATION] Trenches completed: ${tokens.length} tokens`);
+  } catch (e) {
+    console.error('[MIGRATION] Fetch trenches completed failed:', e.message?.slice(0, 80));
+  }
+
+  console.log(`[MIGRATION] Total unique tokens from all sources: ${allTokens.size}`);
+  return Array.from(allTokens.values());
 }
 
 // ─── Enrich token with GMGN token info ──────────────────
@@ -153,7 +218,7 @@ async function runMigrationScan(processToken) {
   const config = getMigrationConfig();
   if (!config.enabled) return;
 
-  const tokens = await fetchTrending();
+  const tokens = await fetchAllSources();
   if (!tokens.length) return;
 
   const events = detectMigrations(tokens);
