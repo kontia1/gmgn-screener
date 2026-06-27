@@ -147,13 +147,15 @@ async function pumpSdkBuy(tokenMint, solAmount, slippageBps = 300) {
       buyState = await online.fetchBuyState(mint, keypair.publicKey);
       break;
     } catch (e) {
-      if (e.message?.includes('Bonding curve account not found') && attempt < 2) {
+      const msg = e.message || '';
+      const noBC = msg.includes('Bonding curve account not found') || msg.includes("reading 'eq'");
+      if (noBC && attempt < 2) {
         const wait = (attempt + 1) * 3;
-        console.log(`[TRADE] Bonding curve not found, retrying in ${wait}s (RPC lag, attempt ${attempt + 1}/3)...`);
+        console.log(`[TRADE] Bonding curve not found, retrying in ${wait}s (attempt ${attempt + 1}/3)...`);
         await new Promise(r => setTimeout(r, wait * 1000));
         continue;
       }
-      if (e.message?.includes('Bonding curve account not found')) {
+      if (noBC) {
         buyState = null;
         break;
       }
@@ -211,13 +213,15 @@ async function pumpSdkSell(tokenMint, tokenAmount, decimals, slippageBps = 300) 
       sellState = await online.fetchSellState(mint, keypair.publicKey);
       break;
     } catch (e) {
-      if (e.message?.includes('Bonding curve account not found') && attempt < 2) {
+      const msg = e.message || '';
+      const noBC = msg.includes('Bonding curve account not found') || msg.includes("reading 'eq'");
+      if (noBC && attempt < 2) {
         const wait = (attempt + 1) * 3;
-        console.log(`[TRADE] Bonding curve not found, retrying in ${wait}s (RPC lag, attempt ${attempt + 1}/3)...`);
+        console.log(`[TRADE] Bonding curve not found, retrying in ${wait}s (attempt ${attempt + 1}/3)...`);
         await new Promise(r => setTimeout(r, wait * 1000));
         continue;
       }
-      if (e.message?.includes('Bonding curve account not found')) {
+      if (noBC) {
         sellState = null;
         break;
       }

@@ -777,7 +777,7 @@ async function executeFullExit(pos, reason, quoteSolOut = 0, { lockHeld = false 
   } catch (e) {
     releaseSellLock(pos.tokenMint); // C2 FIX: Release on error
     const msg = e.message || '';
-    if (msg.includes('NO_ROUTES_FOUND') || msg.includes('No routes found')) {
+    if (msg.includes('NO_ROUTES_FOUND') || msg.includes('No routes found') || msg.includes('Associated token account not found')) {
       // Token is unsellable — close as dead token (0 SOL received) to stop retry spam
       console.log(`[AUTO] 💀 ${pos.symbol}: NO_ROUTES during sell, closing as dead token`);
       try {
@@ -1219,7 +1219,7 @@ async function checkPositions() {
         }
       } catch (e) {
         const msg = e.message || '';
-        if (msg.includes('NO_ROUTES_FOUND') || msg.includes('No routes found')) {
+        if (msg.includes('NO_ROUTES_FOUND') || msg.includes('No routes found') || msg.includes('Associated token account not found')) {
           // Fallback: try GMGN price when Jupiter has no routes
           try {
             const gmgnData = await gmgnTokenInfo(pos.tokenMint);
@@ -1831,7 +1831,7 @@ async function processUnifiedPosition(pos, isDryMode) {
       if (msg.includes('429') || msg.includes('Too many requests')) {
         console.log(`[UNIFIED] ${pos.symbol}: Jupiter 429, using cached`);
         quoteSolOut = pos._lastRugQuoteSol || 0;
-      } else if (msg.includes('NO_ROUTES_FOUND') || msg.includes('No routes found')) {
+      } else if (msg.includes('NO_ROUTES_FOUND') || msg.includes('No routes found') || msg.includes('Associated token account not found')) {
         const failCount = (pos.quoteFailCount || 0) + 1;
         if (failCount >= 3) {
           updatePosField(pos, isDryMode, { lastRugCheck: checkNow });
