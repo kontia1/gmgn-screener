@@ -397,9 +397,8 @@ async function runMigrationScan(processToken) {
     // ── Watcher: poll every 5s, buy immediately if price up, skip if dump ──
     if (config.watchSec > 0) {
       const initialPrice = enriched.price_usd || 0;
-      const minPolls = 3;
-      const pollInterval = Math.max(3, Math.floor(config.watchSec / minPolls)); // min 3s per poll
-      const maxPolls = Math.max(minPolls, Math.ceil(config.watchSec / pollInterval));
+      const pollInterval = 3; // fixed 3s polling
+      const maxPolls = Math.ceil(config.watchSec / pollInterval);
       let approved = false;
 
       console.log(`[MIGRATION] ${sym}: watching max ${config.watchSec}s, polling every ${pollInterval}s (initial: $${initialPrice})...`);
