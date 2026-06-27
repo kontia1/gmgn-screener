@@ -197,6 +197,12 @@ async function enrichToken(token) {
     token.entrapment_ratio = stat.top_entrapment_trader_percentage || token.entrapment_ratio || 0;
     token.smart_degen_count = stat.smart_degen_count || token.smart_degen_count || 0;
 
+    // Wallet info for notification display
+    const dev = info.dev || {};
+    const link = info.link || {};
+    token._walletAddress = dev.creator_address || dev.address || token._walletAddress || '';
+    token._walletTwitter = link.twitter_username || link.twitter || token._walletTwitter || '';
+
     return token;
   } catch {
     return token;
