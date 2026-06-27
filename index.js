@@ -142,8 +142,6 @@ async function main() {
           // Same filters as trending/trenches (with debug logging)
           const _sym = token.symbol || '?';
           if (ageMin < CONFIG.minAgeMin || ageMin > CONFIG.maxAgeMin) { console.log(`[SIGNAL:FILTER] ${_sym} REJECTED: age=${ageMin.toFixed(0)}m (min=${CONFIG.minAgeMin} max=${CONFIG.maxAgeMin})`); return; }
-          // Hard floor: minimum 2 min — 100% rugs happen in <2 min, prevents instant-dump tokens
-          if (ageMin < 2) { console.log(`[SIGNAL:FILTER] ${_sym} REJECTED: age=${ageMin.toFixed(1)}m (hard floor 2m — too young)`); return; }
           if (mc < CONFIG.minMC || mc > CONFIG.maxMC) { console.log(`[SIGNAL:FILTER] ${_sym} REJECTED: mc=$${Math.round(mc)} (min=${CONFIG.minMC} max=${CONFIG.maxMC})`); return; }
           const vol = token.volume_24h || token.volume || 0;
           if (vol < CONFIG.minVolume) { console.log(`[SIGNAL:FILTER] ${_sym} REJECTED: vol=$${Math.round(vol)} (min=${CONFIG.minVolume})`); return; }
