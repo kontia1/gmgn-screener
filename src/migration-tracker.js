@@ -290,11 +290,8 @@ async function runMigrationScan(processToken) {
     const addr = event.address;
     const sym = event.symbol || '?';
 
-    // Global dedup
-    if (checkGlobalDedup(addr, 'migration')) {
-      console.log(`[MIGRATION] ${sym} skipped: global dedup`);
-      continue;
-    }
+    // Skip global dedup for migration — migration events are rare and valuable
+    // Buy lock in trackerProcessToken prevents duplicate buys from different sources
 
     // Per-source dedup
     const seenKey = `migration_${addr}`;
