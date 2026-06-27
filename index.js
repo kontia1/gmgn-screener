@@ -337,6 +337,11 @@ async function main() {
     }
 
     // ── Normal alert + autoBuy ──
+    // Set trade amount for notification (before buy executes)
+    if (!token._totalUsd && !token._tradeAmountUsd) {
+      const solPrice = global._solPriceUsd || 0;
+      token._tradeAmountUsd = (cfg.buyAmountSol || 0.015) * solPrice;
+    }
     const tagStr = (token._walletTags || []).filter(t => t !== 'wash_trader').join(', ');
     const walletInfo = token._walletTwitter
       ? `@${token._walletTwitter}`
