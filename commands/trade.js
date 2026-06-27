@@ -395,7 +395,7 @@ async function handlePnl(chatId) {
   const cfg = autotrade.getAutoConfig();
   const isDryMode = cfg.mode === 'dry_run';
   const open = isDryMode ? dryRun.getOpenDryPositions() : positions.getOpenPositions();
-  const closed = isDryMode ? dryRun.getClosedDryPositions(100) : positions.getClosedPositions(100);
+  const closed = isDryMode ? dryRun.getClosedDryPositions() : positions.getClosedPositions();
 
   let openPnl = 0;
 
