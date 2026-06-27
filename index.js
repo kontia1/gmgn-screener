@@ -152,7 +152,7 @@ async function main() {
           if (top10 > CONFIG.maxTop10HolderRate) { console.log(`[SIGNAL:FILTER] ${_sym} REJECTED: top10=${(top10*100).toFixed(0)}% (max=${(CONFIG.maxTop10HolderRate*100).toFixed(0)}%)`); return; }
           // Serial launcher block: creator has launched 50+ tokens = scam factory
           const _creatorOpen = token.creator_open_count || token.creatorOpenCount || 0;
-          if (_creatorOpen > 50) { console.log(`[SIGNAL:FILTER] ${_sym} REJECTED: creatorOpenCount=${_creatorOpen} (>50 serial launcher)`); return; }
+          if (CONFIG.maxCreatorOpenCount && _creatorOpen > CONFIG.maxCreatorOpenCount) { console.log(`[SIGNAL:FILTER] ${_sym} REJECTED: creatorOpenCount=${_creatorOpen} (>${CONFIG.maxCreatorOpenCount})`); return; }
 
           // Hard block: young token + bot-inflated buy pressure = likely rug
           const _ratio = token.buyRatio || token.buy_ratio || (token.buys ? token.buys / Math.max(1, token.sells || 0) : 0);

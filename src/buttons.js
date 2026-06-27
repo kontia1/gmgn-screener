@@ -117,7 +117,8 @@ const MENU = {
        { text: `👀 Visits: ${cfg.customFilters?.minVisitingCount ?? 20}+`, callback_data: 'cfg_filter_minVisitingCount' }],
       [{ text: `🤖 BotRate: <${((cfg.customFilters?.maxBotDegenRate ?? 0)*100).toFixed(0)}%`, callback_data: 'cfg_filter_maxBotDegenRate' },
        { text: `💧 InitLiq: ${fmtVol(cfg.customFilters?.minInitialLiquidity ?? 0)}`, callback_data: 'cfg_filter_minInitialLiquidity' }],
-      [{ text: `📣 Boost: ${fmtVol(cfg.customFilters?.maxDexscrBoostFee ?? 0)}`, callback_data: 'cfg_filter_maxDexscrBoostFee' }],
+      [{ text: `📣 Boost: ${fmtVol(cfg.customFilters?.maxDexscrBoostFee ?? 0)}`, callback_data: 'cfg_filter_maxDexscrBoostFee' },
+       { text: `🏭 CreatorOpen: ${cfg.customFilters?.maxCreatorOpenCount ?? 0}`, callback_data: 'cfg_filter_maxCreatorOpenCount' }],
       // ── Duplicate Filters section ──
       [{ text: '🔍 Duplicate Filters', callback_data: 'noop' }],
       [{ text: cfg.duplicateFilters?.enabled ? '✅ Dup Filter ON' : '❌ Dup Filter OFF', callback_data: 'cfg_dup_toggle' }],
@@ -227,6 +228,7 @@ const MENU = {
     // maxImageDup and maxTwitterCreateTokenCount moved to Duplicate Filters section
     minInitialLiquidity: { label: 'Min Initial Liquidity ($)', hint: 'e.g. 5000 (0=OFF)', min: 0, max: 1000000 },
     maxDexscrBoostFee: { label: 'Max DexScreener Boost ($)', hint: 'e.g. 1 (0=OFF)', min: 0, max: 100000 },
+    maxCreatorOpenCount: { label: 'Max Creator Open Count', hint: 'e.g. 50 (0=OFF, 50+=serial launcher)', min: 0, max: 9999, step: 5 },
     // ── Duplicate filters ──
     dup_maxImageDup: { label: 'Max Logo Dup Count', hint: 'e.g. 5 (0=OFF)', min: 0, max: 10000 },
     dup_maxTwitterDup: { label: 'Max Twitter Dup Count', hint: 'e.g. 3 (0=OFF)', min: 0, max: 10000 },

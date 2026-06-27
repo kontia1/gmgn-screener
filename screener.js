@@ -74,6 +74,7 @@ const DEFAULT_FILTERS = {
   maxTwitterCreateTokenCount: 0, // Max tokens launched by same Twitter, 0 = OFF
   minInitialLiquidity: 0,     // Min launch liquidity ($), 0 = OFF
   maxDexscrBoostFee: 0,       // Max DexScreener boost fee ($), 0 = OFF
+  maxCreatorOpenCount: 0,     // Max tokens launched by creator, 0 = OFF (50+ = serial launcher)
 };
 
 function getActiveFilters() {
@@ -304,7 +305,7 @@ async function runScan() {
   console.log(`[Scan] ${all.size} tokens`);
 
   let count = 0;
-  let stats = { age: 0, mc: 0, vol: 0, wash: 0, bundler: 0, top10: 0, buysell: 0, seen: 0, score: 0, liq: 0, smart: 0, entrap: 0, sniper: 0, momentum: 0, hot: 0, visiting: 0, botdegen: 0, botrate: 0, imgdup: 0, twcreate: 0, initliq: 0, boost: 0 };
+  let stats = { age: 0, mc: 0, vol: 0, wash: 0, bundler: 0, top10: 0, buysell: 0, seen: 0, score: 0, liq: 0, smart: 0, entrap: 0, sniper: 0, momentum: 0, hot: 0, visiting: 0, botdegen: 0, botrate: 0, imgdup: 0, twcreate: 0, initliq: 0, boost: 0, creatoropen: 0 };
   for (const [addr, t] of all) {
     const ageMin = getAgeMin(t, now);
     const mc = t.market_cap || t.fdv || 0;
@@ -366,6 +367,8 @@ async function runScan() {
     // maxImageDup and maxTwitterCreateTokenCount moved to Duplicate Filters section (line 373) to avoid conflict
     if (CONFIG.minInitialLiquidity && initialLiq < CONFIG.minInitialLiquidity) { stats.initliq++; continue; }
     if (CONFIG.maxDexscrBoostFee && boostFee > CONFIG.maxDexscrBoostFee) { stats.boost++; continue; }
+    const creatorOpenCount = t.creator_open_count || t.creatorOpenCount || 0;
+    if (CONFIG.maxCreatorOpenCount && creatorOpenCount > CONFIG.maxCreatorOpenCount) { stats.creatoropen++; continue; }
 
     // ── Duplicate filters (from duplicateFilters section) ──
     const dupFilters = getAutoConfig().duplicateFilters || {};
@@ -492,7 +495,7 @@ async function runScan() {
   }
 
   saveSeen(seen, source);
-  console.log(`[Scan] Done. ${count} alerts. Filtered out: age=${stats.age} mc=${stats.mc} vol=${stats.vol} wash=${stats.wash} bundler=${stats.bundler} top10=${stats.top10} holder=${stats.holder||0} buysell=${stats.buysell} liq=${stats.liq} smart=${stats.smart} entrap=${stats.entrap} sniper=${stats.sniper} momentum=${stats.momentum} hot=${stats.hot} visiting=${stats.visiting} botdegen=${stats.botdegen} botrate=${stats.botrate} imgdup=${stats.imgdup} twcreate=${stats.twcreate} initliq=${stats.initliq} boost=${stats.boost} seen=${stats.seen} score=${stats.score}`);
+  console.log(`[Scan] Done. ${count} alerts. Filtered out: age=${stats.age} mc=${stats.mc} vol=${stats.vol} wash=${stats.wash} bundler=${stats.bundler} top10=${stats.top10} holder=${stats.holder||0} buysell=${stats.buysell} liq=${stats.liq} smart=${stats.smart} entrap=${stats.entrap} sniper=${stats.sniper} momentum=${stats.momentum} hot=${stats.hot} visiting=${stats.visiting} botdegen=${stats.botdegen} botrate=${stats.botrate} imgdup=${stats.imgdup} twcreate=${stats.twcreate} initliq=${stats.initliq} boost=${stats.boost} creatoropen=${stats.creatoropen} seen=${stats.seen} score=${stats.score}`);
 }
 
 // Run once if executed directly
