@@ -279,8 +279,9 @@ function getOpenPositions() {
 }
 
 // ─── Get Closed History ────────────────────────────────
-function getClosedPositions(limit = 20) {
-  return loadClosed().slice(0, limit);
+function getClosedPositions(limit) {
+  const all = loadClosed();
+  return limit ? all.slice(0, limit) : all;
 }
 
 // ─── Remove from Screening ─────────────────────────────

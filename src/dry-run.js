@@ -172,8 +172,9 @@ function getOpenDryPositions() {
 }
 
 // ─── Get Closed Dry Run History ────────────────────────
-function getClosedDryPositions(limit = 20) {
-  return loadDryClosed().slice(0, limit);
+function getClosedDryPositions(limit) {
+  const all = loadDryClosed();
+  return limit ? all.slice(0, limit) : all;
 }
 
 // ─── Update Dry Run Position ───────────────────────────
