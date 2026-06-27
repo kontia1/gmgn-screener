@@ -394,39 +394,66 @@ async function runMigrationScan(processToken) {
     const tag = isExternal ? '🔗 EXTERNAL' : '🎯';
     console.log(`[MIGRATION] ${tag} ${sym} ${event.fromExchange} → ${event.toExchange} (${event._detectionMethod}) | MC=$${Math.round(mc)} | Liq=$${Math.round(liq)}`);
 
-    // ── Watcher: wait watchSec, then check if price dropped ──
+    // ── Watcher: poll every 5s, buy immediately if price up, skip if dump ──
     if (config.watchSec > 0) {
       const initialPrice = enriched.price_usd || 0;
-      console.log(`[MIGRATION] ${sym}: watching ${config.watchSec}s (initial price: $${initialPrice})...`);
-      await new Promise(r => setTimeout(r, config.watchSec * 1000));
+      const pollInterval = 5; // check every 5s
+      const maxPolls = Math.ceil(config.watchSec / pollInterval);
+      let approved = false;
 
-      // Re-fetch price after watch period
-      try {
-        const { stdout: stdout2 } = await execAsync(
-          `gmgn-cli token info --chain sol --address ${addr} --raw`,
-          { timeout: 10000 }
-        );
-        const raw2 = JSON.parse(stdout2.replace(/\x00/g, ''));
-        const info2 = raw2?.data || raw2 || {};
-        const price2 = info2.price || {};
-        const currentPrice = parseFloat(price2.price) || 0;
+      console.log(`[MIGRATION] ${sym}: watching max ${config.watchSec}s, polling every ${pollInterval}s (initial: $${initialPrice})...`);
 
-        if (initialPrice > 0 && currentPrice > 0) {
-          const dropPct = ((initialPrice - currentPrice) / initialPrice) * 100;
-          const changeStr = dropPct >= 0 ? `-${dropPct.toFixed(1)}%` : `+${Math.abs(dropPct).toFixed(1)}%`;
-          console.log(`[MIGRATION] ${sym}: after ${config.watchSec}s → $${currentPrice} (${changeStr})`);
+      for (let poll = 1; poll <= maxPolls; poll++) {
+        await new Promise(r => setTimeout(r, pollInterval * 1000));
 
-          if (dropPct > config.maxDropPct) {
-            console.log(`[MIGRATION] ${sym} REJECTED: price dropped ${dropPct.toFixed(1)}% (max ${config.maxDropPct}%) — dump detected`);
-            continue;
+        try {
+          const { stdout: stdout2 } = await execAsync(
+            `gmgn-cli token info --chain sol --address ${addr} --raw`,
+            { timeout: 10000 }
+          );
+          const raw2 = JSON.parse(stdout2.replace(/\x00/g, ''));
+          const info2 = raw2?.data || raw2 || {};
+          const price2 = info2.price || {};
+          const currentPrice = parseFloat(price2.price) || 0;
+
+          if (initialPrice > 0 && currentPrice > 0) {
+            const changePct = ((currentPrice - initialPrice) / initialPrice) * 100;
+            const elapsed = poll * pollInterval;
+            console.log(`[MIGRATION] ${sym}: +${elapsed}s → $${currentPrice} (${changePct >= 0 ? '+' : ''}${changePct.toFixed(1)}%)`);
+
+            // Price dropped too much → skip
+            if (changePct < -config.maxDropPct) {
+              console.log(`[MIGRATION] ${sym} REJECTED: price dropped ${Math.abs(changePct).toFixed(1)}% (max ${config.maxDropPct}%) — dump detected`);
+              break;
+            }
+
+            // Price is up or stable → buy immediately, don't wait full watchSec
+            if (changePct >= 0) {
+              console.log(`[MIGRATION] ${sym} APPROVED: price ${changePct >= 0 ? 'stable' : 'recovering'} after ${elapsed}s`);
+              enriched.price_usd = currentPrice;
+              enriched.market_cap = parseFloat(price2.market_cap) || currentPrice * (enriched.circulating_supply || 0);
+              approved = true;
+              break;
+            }
+
+            // Price slightly down but within tolerance → keep watching
+            if (poll === maxPolls) {
+              // Max wait reached, price still slightly down but within tolerance → approve
+              console.log(`[MIGRATION] ${sym} APPROVED: max watch reached, drop ${Math.abs(changePct).toFixed(1)}% within tolerance`);
+              enriched.price_usd = currentPrice;
+              enriched.market_cap = parseFloat(price2.market_cap) || currentPrice * (enriched.circulating_supply || 0);
+              approved = true;
+            }
           }
-
-          // Update enriched data with fresh price
-          enriched.price_usd = currentPrice;
-          enriched.market_cap = parseFloat(price2.market_cap) || currentPrice * (enriched.circulating_supply || 0);
+        } catch (watchErr) {
+          console.log(`[MIGRATION] ${sym}: watch poll ${poll} failed (${watchErr.message?.slice(0, 50)})`);
+          if (poll === maxPolls) approved = true; // proceed on last poll failure
         }
-      } catch (watchErr) {
-        console.log(`[MIGRATION] ${sym}: watch re-fetch failed (${watchErr.message?.slice(0, 50)}), proceeding with original data`);
+      }
+
+      if (!approved) {
+        console.log(`[MIGRATION] ${sym}: watcher rejected (dump detected)`);
+        continue;
       }
     }
 
