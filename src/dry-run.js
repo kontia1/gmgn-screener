@@ -151,7 +151,7 @@ function closeDryPosition(tokenMint, solVirtual, reason = 'manual') {
 
   const closedList = loadDryClosed();
   closedList.unshift(closed);
-  if (closedList.length > 100) closedList.length = 100;
+  // No cap — keep all closed trades for true all-time PNL
   saveDryClosed(closedList);
 
   delete positions[tokenMint];

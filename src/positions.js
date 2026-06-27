@@ -168,7 +168,7 @@ function _closePosition(tokenMint, solReceived, txSignature, reason = 'manual') 
   // Move to closed history
   const closedList = loadClosed();
   closedList.unshift(closed);
-  if (closedList.length > 100) closedList.length = 100;
+  // No cap — keep all closed trades for true all-time PNL
   saveClosed(closedList);
 
   // Remove from open positions
