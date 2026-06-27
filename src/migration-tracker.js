@@ -206,7 +206,7 @@ async function enrichToken(token) {
     const dev = info.dev || {};
     const link = info.link || {};
     token._walletAddress = dev.creator_address || dev.address || token._walletAddress || '';
-    token._walletTwitter = link.twitter_username || link.twitter || token._walletTwitter || '';
+    token._walletTwitter = link.twitter_username || token._walletTwitter || '';
 
     return token;
   } catch {
