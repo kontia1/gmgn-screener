@@ -27,6 +27,8 @@ const DEFAULT_MIGRATION_CONFIG = {
   minHolder: 20,            // min holders 20
   minScore: 35,             // min score (lower than other sources — migration is strong signal)
   targetExchanges: ['pump_amm', 'meteora_damm_v2'], // migration targets to detect
+  watchSec: 30,             // wait N seconds after migration before buying
+  maxDropPct: 15,           // skip if price drops > N% during watch period
 };
 
 // ─── State ──────────────────────────────────────────────
@@ -192,10 +194,13 @@ async function enrichToken(token) {
     token.price_usd = parseFloat(price.price) || 0;
     token.circulating_supply = parseFloat(raw.circulating_supply || price.circulating_supply) || 0;
     token.top_10_holder_rate = stat.top_10_holder_rate || token.top_10_holder_rate || 0;
-    token.bundler_rate = stat.bundler_trader_amount_rate || token.bundler_rate || 0;
+    token.bundler_rate = stat.top_bundler_trader_percentage || stat.bundler_trader_amount_rate || token.bundler_rate || 0;
     token.creation_timestamp = pool.creation_timestamp || token.creation_timestamp || 0;  // for age filter
     token.entrapment_ratio = stat.top_entrapment_trader_percentage || token.entrapment_ratio || 0;
     token.smart_degen_count = stat.smart_degen_count || token.smart_degen_count || 0;
+    token.bot_degen_rate = stat.bot_degen_rate || token.bot_degen_rate || 0;
+    token.fresh_wallet_rate = stat.fresh_wallet_rate || token.fresh_wallet_rate || 0;
+    token.creator_hold_rate = stat.creator_hold_rate || token.creator_hold_rate || 0;
 
     // Wallet info for notification display
     const dev = info.dev || {};
@@ -388,6 +393,42 @@ async function runMigrationScan(processToken) {
 
     const tag = isExternal ? '🔗 EXTERNAL' : '🎯';
     console.log(`[MIGRATION] ${tag} ${sym} ${event.fromExchange} → ${event.toExchange} (${event._detectionMethod}) | MC=$${Math.round(mc)} | Liq=$${Math.round(liq)}`);
+
+    // ── Watcher: wait watchSec, then check if price dropped ──
+    if (config.watchSec > 0) {
+      const initialPrice = enriched.price_usd || 0;
+      console.log(`[MIGRATION] ${sym}: watching ${config.watchSec}s (initial price: $${initialPrice})...`);
+      await new Promise(r => setTimeout(r, config.watchSec * 1000));
+
+      // Re-fetch price after watch period
+      try {
+        const { stdout: stdout2 } = await execAsync(
+          `gmgn-cli token info --chain sol --address ${addr} --raw`,
+          { timeout: 10000 }
+        );
+        const raw2 = JSON.parse(stdout2.replace(/\x00/g, ''));
+        const info2 = raw2?.data || raw2 || {};
+        const price2 = info2.price || {};
+        const currentPrice = parseFloat(price2.price) || 0;
+
+        if (initialPrice > 0 && currentPrice > 0) {
+          const dropPct = ((initialPrice - currentPrice) / initialPrice) * 100;
+          const changeStr = dropPct >= 0 ? `-${dropPct.toFixed(1)}%` : `+${Math.abs(dropPct).toFixed(1)}%`;
+          console.log(`[MIGRATION] ${sym}: after ${config.watchSec}s → $${currentPrice} (${changeStr})`);
+
+          if (dropPct > config.maxDropPct) {
+            console.log(`[MIGRATION] ${sym} REJECTED: price dropped ${dropPct.toFixed(1)}% (max ${config.maxDropPct}%) — dump detected`);
+            continue;
+          }
+
+          // Update enriched data with fresh price
+          enriched.price_usd = currentPrice;
+          enriched.market_cap = parseFloat(price2.market_cap) || currentPrice * (enriched.circulating_supply || 0);
+        }
+      } catch (watchErr) {
+        console.log(`[MIGRATION] ${sym}: watch re-fetch failed (${watchErr.message?.slice(0, 50)}), proceeding with original data`);
+      }
+    }
 
     // Feed into pipeline
     await processToken(enriched, 'migration');
