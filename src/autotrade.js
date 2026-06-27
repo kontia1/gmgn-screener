@@ -721,7 +721,7 @@ async function executeFullExit(pos, reason, quoteSolOut = 0, { lockHeld = false 
   }
 
   try {
-    const result = await sellAll(pos.tokenMint, autoConfig.walletLabel, 500);
+    const result = await sellAll(pos.tokenMint, autoConfig.walletLabel, 1500); // 15% slippage for emergency sells
 
     if (result.success) {
       let closed;
@@ -1531,7 +1531,7 @@ async function checkBundlers() {
             let sellResult = null;
             for (let attempt = 1; attempt <= 3; attempt++) {
               try {
-                sellResult = await sellAll(pos.tokenMint, autoConfig.walletLabel, 500);
+                sellResult = await sellAll(pos.tokenMint, autoConfig.walletLabel, 1500); // 15% slippage for emergency sells
                 if (sellResult.success) break;
               } catch (sellErr) {
                 console.error(`[BUNDLER] Sell attempt ${attempt}/3 failed: ${sellErr.message}`);
@@ -1728,7 +1728,7 @@ async function processUnifiedPosition(pos, isDryMode) {
           console.log(`[UNIFIED] ${pos.symbol}: liq dropped to $0 — instant exit`);
           if (acquireSellLock(pos.tokenMint)) {
             try {
-              const closeResult = await sellAll(pos.tokenMint, autoConfig.walletLabel, 500);
+              const closeResult = await sellAll(pos.tokenMint, autoConfig.walletLabel, 1500); // 15% slippage for emergency sells
               if (closeResult?.success) {
                 const closed = closePosition(pos.tokenMint, closeResult.outputSol, closeResult.signature, 'liq_drain_100%');
                 setPostCloseLock(pos.tokenMint);
