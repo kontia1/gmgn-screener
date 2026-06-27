@@ -3,7 +3,7 @@
  * GMGN Screener — runs periodically, sends alerts
  * Usage: node screener.js
  */
-const { gmgn, sendTelegram, fmtPrice, fmtMc } = require('./lib/shared');
+const { gmgn, sendTelegram, fmtPrice, fmtMc, escHtml } = require('./lib/shared');
 const { autoBuy, getAutoConfig } = require('./src/autotrade');
 const { alertButtons } = require('./src/buttons');
 const { checkGlobalDedup, setGlobalDedup, applySignalAdjustment, getSignalConfig, runSignalScan } = require('./src/signal-scanner');
@@ -205,7 +205,7 @@ function formatAlert(t, score, reasons) {
   const lines = [
     `🔍 <b>GMGN Screener</b>`,
     ``,
-    `<b>${t.symbol}</b>`,
+    `<b>${escHtml(t.symbol || 'Unknown')}</b>`,
     `<code>${t.address}</code>`,
     ``,
     `💰 <b>Price:</b> ${fmtPrice(price)}`,

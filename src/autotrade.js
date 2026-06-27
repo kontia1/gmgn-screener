@@ -227,6 +227,15 @@ function getBuyLockStatus() {
 }
 
 // ─── Auto-Buy on Screener Alert ────────────────────────
+// Redact URLs/API keys from error messages before sending to Telegram
+function redactErr(msg) {
+  if (!msg) return 'unknown error';
+  return String(msg)
+    .replace(/https?:\/\/[^\s"'`]+/g, '[URL_REDACTED]')
+    .replace(/[?&](?:api_?key|apikey|key)=([^\s&"'`]+)/gi, '?key=[REDACTED]')
+    .slice(0, 500); // cap length
+}
+
 async function autoBuy(tokenData) {
   const cfg = loadAutoConfig();
   if (!cfg.enabled) return null;
@@ -581,7 +590,10 @@ async function executePartialSell(pos, partial, currentPrice) {
     ? (dryRun.getDryPosition(pos.tokenMint) || pos)
     : (positions.getPosition(pos.tokenMint) || pos);
   const tokensToSell = freshPos.remainingTokens * (partial.sellPct / 100);
-  if (tokensToSell <= 0) return;
+  if (tokensToSell <= 0) {
+    if (!isDry && !lockFromCaller) releaseSellLock(pos.tokenMint);
+    return;
+  }
 
   console.log(`[AUTO] Partial sell ${partial.sellPct}% of ${freshPos.symbol} at +${partial.atPct}% (${tokensToSell.toFixed(2)} tokens)`);
 
@@ -809,10 +821,10 @@ async function executeFullExit(pos, reason, quoteSolOut = 0, { lockHeld = false 
       console.error(`[AUTO] ${pos.symbol}: sell failed ${failCount}x, closing as loss`);
       try { closePosition(pos.tokenMint, 0, "", "sell_failed_3x"); } catch(_) {}
       setPostCloseLock(pos.tokenMint);
-      sendTelegram(`🔴 <b>Auto-Close (Sell Failed 3x): ${pos.symbol}</b>\n\n📊 PNL: -${(pos.solSpent || 0).toFixed(4)} SOL (total loss)\n📝 Error: ${e.message}`).catch(() => {});
+      sendTelegram(`🔴 <b>Auto-Close (Sell Failed 3x): ${pos.symbol}</b>\n\n📊 PNL: -${(pos.solSpent || 0).toFixed(4)} SOL (total loss)\n📝 Error: ${redactErr(e.message)}`).catch(() => {});
     } else {
       console.error(`[AUTO] Full exit failed (${failCount}/3): ${e.message}`);
-      await sendTelegram(`❌ Auto-Sell failed: ${pos.symbol}\n${e.message}\n⚠️ Attempt ${failCount}/3`);
+      await sendTelegram(`❌ Auto-Sell failed: ${pos.symbol}\n${redactErr(e.message)}\n⚠️ Attempt ${failCount}/3`);
     }
     return { success: false, reason: 'sell_error', error: e.message, failCount };
   }
@@ -985,8 +997,7 @@ async function checkRugSignals(pos, cachedGmgnData, cachedLastQuoteSol) {
         rugScore += 15;
       }
     }
-    pos._prevSellVol1m = curSellVol1m;
-    pos._prevSellVol1mTs = Date.now();
+    updatePosField(pos, isDryMode, { _prevSellVol1m: curSellVol1m, _prevSellVol1mTs: Date.now() });
 
     // Signal 6: Jupiter price impact (absolute + rate of change)
     const lastImpact = parseFloat(pos._lastPriceImpact || 0);

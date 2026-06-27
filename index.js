@@ -13,7 +13,7 @@ const { startMonitor } = require('./src/autotrade');
 const { runSignalScan, getSignalConfig, applySignalAdjustment, cleanupGlobalDedup } = require('./src/signal-scanner');
 const { scoreToken, SIGNAL_NAMES, DEFAULT_FILTERS, getTrackerStatus } = require('./screener');
 const { autoBuy, getAutoConfig } = require('./src/autotrade');
-const { sendTelegram, fmtMc } = require('./lib/shared');
+const { sendTelegram, fmtMc, escHtml } = require('./lib/shared');
 const { alertButtons } = require('./src/buttons');
 const { runTrackerScan, getTrackerConfig } = require('./src/smartmoney-tracker');
 const { runMigrationScan, getMigrationConfig } = require('./src/migration-tracker');
@@ -80,7 +80,7 @@ async function main() {
     const ageMin = t._ageMin || 0;
     const ageStr = ageMin >= 60 ? `${(ageMin/60).toFixed(1)}h` : `${ageMin.toFixed(0)}min`;
     const lines = [
-      `📡 <b>Signal Buy: ${t.symbol}</b>`,
+      `📡 <b>Signal Buy: ${escHtml(t.symbol || 'Unknown')}</b>`,
       ``,
       `Base Score: ${baseScore}`,
       `Signal Bonus: +${meta.appliedSignal}`,
