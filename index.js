@@ -142,6 +142,8 @@ async function main() {
           // Same filters as trending/trenches (with debug logging)
           const _sym = token.symbol || '?';
           if (ageMin < CONFIG.minAgeMin || ageMin > CONFIG.maxAgeMin) { console.log(`[SIGNAL:FILTER] ${_sym} REJECTED: age=${ageMin.toFixed(0)}m (min=${CONFIG.minAgeMin} max=${CONFIG.maxAgeMin})`); return; }
+          // Hard floor: minimum 2 min — 100% rugs happen in <2 min, prevents instant-dump tokens
+          if (ageMin < 2) { console.log(`[SIGNAL:FILTER] ${_sym} REJECTED: age=${ageMin.toFixed(1)}m (hard floor 2m — too young)`); return; }
           if (mc < CONFIG.minMC || mc > CONFIG.maxMC) { console.log(`[SIGNAL:FILTER] ${_sym} REJECTED: mc=$${Math.round(mc)} (min=${CONFIG.minMC} max=${CONFIG.maxMC})`); return; }
           const vol = token.volume_24h || token.volume || 0;
           if (vol < CONFIG.minVolume) { console.log(`[SIGNAL:FILTER] ${_sym} REJECTED: vol=$${Math.round(vol)} (min=${CONFIG.minVolume})`); return; }
@@ -150,6 +152,9 @@ async function main() {
           if (bundler > CONFIG.maxBundlerRate) { console.log(`[SIGNAL:FILTER] ${_sym} REJECTED: bundler=${(bundler*100).toFixed(0)}% (max=${(CONFIG.maxBundlerRate*100).toFixed(0)}%)`); return; }
           const top10 = token.top_10_holder_rate || 0;
           if (top10 > CONFIG.maxTop10HolderRate) { console.log(`[SIGNAL:FILTER] ${_sym} REJECTED: top10=${(top10*100).toFixed(0)}% (max=${(CONFIG.maxTop10HolderRate*100).toFixed(0)}%)`); return; }
+          // Serial launcher block: creator has launched 50+ tokens = scam factory
+          const _creatorOpen = token.creator_open_count || token.creatorOpenCount || 0;
+          if (_creatorOpen > 50) { console.log(`[SIGNAL:FILTER] ${_sym} REJECTED: creatorOpenCount=${_creatorOpen} (>50 serial launcher)`); return; }
 
           // Hard block: young token + bot-inflated buy pressure = likely rug
           const _ratio = token.buyRatio || token.buy_ratio || (token.buys ? token.buys / Math.max(1, token.sells || 0) : 0);

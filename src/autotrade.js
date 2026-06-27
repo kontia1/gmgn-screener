@@ -1482,7 +1482,7 @@ async function checkBundlers() {
           }
           lockAcquired = true;
           console.log(`[BUNDLER] 🚨 ${pos.symbol}: ${bundlerResult.details}`);
-          const pnlPct = pos.solSpent > 0 ? (((pos.totalSolReceived || 0) - pos.solSpent) / pos.solSpent * 100) : 0;
+          const pnlPct = pos.solSpent > 0 ? ((((pos._lastQuoteSol || 0) + (pos.totalSolReceived || 0)) - pos.solSpent) / pos.solSpent * 100) : 0;
           const bundlerMsg = [
             `🚨 <b>BUNDLER DETECTED</b>`, ``,
             `Token: <b>${pos.symbol || 'Unknown'}</b>`,
@@ -1700,7 +1700,7 @@ async function processUnifiedPosition(pos, isDryMode) {
         `🚨 <b>TOP10 EXIT: ${pos.symbol}</b>`, ``,
         `Top10 holders: <b>${(curTop10Abs*100).toFixed(1)}%</b>`,
         `Age: ${Math.round(ageMs/60000)} min`,
-        `PNL: ${pos.solSpent > 0 ? (((pos.totalSolReceived || 0) - pos.solSpent) / pos.solSpent * 100).toFixed(1) : '?'}%`,
+        `PNL: ${(() => { const quoteSol = pos._lastQuoteSol || 0; const partialSol = pos.totalSolReceived || 0; const totalOut = quoteSol + partialSol; return pos.solSpent > 0 ? ((totalOut - pos.solSpent) / pos.solSpent * 100).toFixed(1) : '?'; })()}%`,
       ].join('\n');
       sendTelegram(top10Msg, { parse_mode: 'HTML' }).catch(() => {});
       if (acquireSellLock(pos.tokenMint)) {
