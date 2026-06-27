@@ -456,6 +456,7 @@ async function handleCallbackQuery(cq) {
       `Max Top10: ${((t.maxTop10HolderRate || 0.40) * 100).toFixed(0)}%`,
       `Min Holders: ${t.minHolder || 20}`,
       `Min Score: ${t.minScore || 35}`,
+      `Watch: ${t.watchSec || 30}s | Max Drop: ${t.maxDropPct || 15}%`,
     ];
 
     await tgApi('editMessageText', {
@@ -473,6 +474,8 @@ async function handleCallbackQuery(cq) {
            { text: `👥 Top10: ${((t.maxTop10HolderRate || 0.40) * 100).toFixed(0)}%`, callback_data: 'tracker_ask_top10_migration' }],
           [{ text: `👤 Holders: ${t.minHolder || 20}`, callback_data: 'tracker_ask_holders_migration' },
            { text: `📊 Score: ${t.minScore || 35}`, callback_data: 'tracker_ask_minscore_migration' }],
+          [{ text: `👁 Watch: ${t.watchSec || 30}s`, callback_data: 'tracker_ask_watch_migration' },
+           { text: `📉 Max Drop: ${t.maxDropPct || 15}%`, callback_data: 'tracker_ask_maxdrop_migration' }],
           [{ text: '⬅️ Config', callback_data: 'menu_config' }],
         ]
       }
@@ -504,6 +507,7 @@ async function handleCallbackQuery(cq) {
       `Max Top10: ${((t.maxTop10HolderRate || 0.40) * 100).toFixed(0)}%`,
       `Min Holders: ${t.minHolder || 20}`,
       `Min Score: ${t.minScore || 35}`,
+      `Watch: ${t.watchSec || 30}s | Max Drop: ${t.maxDropPct || 15}%`,
     ];
     await tgApi('editMessageText', {
       chat_id: chatId,
@@ -520,6 +524,8 @@ async function handleCallbackQuery(cq) {
            { text: `👥 Top10: ${((t.maxTop10HolderRate || 0.40) * 100).toFixed(0)}%`, callback_data: 'tracker_ask_top10_migration' }],
           [{ text: `👤 Holders: ${t.minHolder || 20}`, callback_data: 'tracker_ask_holders_migration' },
            { text: `📊 Score: ${t.minScore || 35}`, callback_data: 'tracker_ask_minscore_migration' }],
+          [{ text: `👁 Watch: ${t.watchSec || 30}s`, callback_data: 'tracker_ask_watch_migration' },
+           { text: `📉 Max Drop: ${t.maxDropPct || 15}%`, callback_data: 'tracker_ask_maxdrop_migration' }],
           [{ text: '⬅️ Config', callback_data: 'menu_config' }],
         ]
       }
@@ -538,6 +544,8 @@ async function handleCallbackQuery(cq) {
       top10: 'Max Top10 %',
       holders: 'Min Holders',
       minscore: 'Min Score',
+      watch: 'Watch Period (detik)',
+      maxdrop: 'Max Drop %',
     };
     const examples = {
       interval: '60',
@@ -547,6 +555,8 @@ async function handleCallbackQuery(cq) {
       top10: '40',
       holders: '20',
       minscore: '35',
+      watch: '30',
+      maxdrop: '15',
     };
 
     if (!fieldLabels[field]) return;
@@ -925,6 +935,8 @@ async function handlePendingInput(chatId, text) {
       top10: 'maxTop10HolderRate',
       holders: 'minHolder',
       minscore: 'minScore',
+      watch: 'watchSec',
+      maxdrop: 'maxDropPct',
     };
 
     let value = num;
@@ -951,6 +963,7 @@ async function handlePendingInput(chatId, text) {
           `Max Top10: ${((t2.maxTop10HolderRate || 0.40) * 100).toFixed(0)}%`,
           `Min Holders: ${t2.minHolder || 20}`,
           `Min Score: ${t2.minScore || 35}`,
+          `Watch: ${t2.watchSec || 30}s | Max Drop: ${t2.maxDropPct || 15}%`,
         ];
         await tgApi('sendMessage', {
           chat_id: chatId, text: lines2.join('\n'), parse_mode: 'HTML',
@@ -959,6 +972,8 @@ async function handlePendingInput(chatId, text) {
              { text: `⏱ ${t2.intervalSec || 90}s`, callback_data: 'tracker_ask_interval_migration' }],
             [{ text: `💰 MC: $${fmtMc(t2.mcMin || 5000)}-${fmtMc(t2.mcMax || 200000)}`, callback_data: 'tracker_ask_mc_migration' },
              { text: `💧 Liq: $${(t2.minLiquidity || 5000).toLocaleString()}`, callback_data: 'tracker_ask_liq_migration' }],
+            [{ text: `👁 Watch: ${t2.watchSec || 30}s`, callback_data: 'tracker_ask_watch_migration' },
+             { text: `📉 Max Drop: ${t2.maxDropPct || 15}%`, callback_data: 'tracker_ask_maxdrop_migration' }],
             [{ text: '⬅️ Config', callback_data: 'menu_config' }],
           ]}
         });
@@ -987,6 +1002,7 @@ async function handlePendingInput(chatId, text) {
       `Max Top10: ${((t.maxTop10HolderRate || 0.40) * 100).toFixed(0)}%`,
       `Min Holders: ${t.minHolder || 20}`,
       `Min Score: ${t.minScore || 35}`,
+      `Watch: ${t.watchSec || 30}s | Max Drop: ${t.maxDropPct || 15}%`,
     ];
     await tgApi('sendMessage', {
       chat_id: chatId,
@@ -1002,6 +1018,8 @@ async function handlePendingInput(chatId, text) {
            { text: `👥 Top10: ${((t.maxTop10HolderRate || 0.40) * 100).toFixed(0)}%`, callback_data: 'tracker_ask_top10_migration' }],
           [{ text: `👤 Holders: ${t.minHolder || 20}`, callback_data: 'tracker_ask_holders_migration' },
            { text: `📊 Score: ${t.minScore || 35}`, callback_data: 'tracker_ask_minscore_migration' }],
+          [{ text: `👁 Watch: ${t.watchSec || 30}s`, callback_data: 'tracker_ask_watch_migration' },
+           { text: `📉 Max Drop: ${t.maxDropPct || 15}%`, callback_data: 'tracker_ask_maxdrop_migration' }],
           [{ text: '⬅️ Config', callback_data: 'menu_config' }],
         ]
       }
