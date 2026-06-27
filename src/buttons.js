@@ -1983,7 +1983,6 @@ async function sendSignalMenu(chatId) {
     [{ text: `⬆️ Max: ${sig.maxContribution ?? 25}`, callback_data: 'cfg_signal_input_maxContribution' },
      { text: dc.enabled !== false ? '🔄 Anti-DC ON' : '🔄 Anti-DC OFF', callback_data: 'cfg_signal_anti_dc' }],
     [{ text: `🌐 Dedup: ${dedupTtl}s`, callback_data: 'cfg_signal_input_dedupTtlSec' }],
-    [{ text: `🏭 CreatorOpen: ${cf.maxCreatorOpenCount ?? 0}`, callback_data: 'cfg_filter_maxCreatorOpenCount' }],
     [{ text: '📋 Edit Weights', callback_data: 'cfg_signal_weight_edit' }],
     [{ text: '🔽 Edit Filters', callback_data: 'menu_config' }],
     [{ text: '🔙 Back', callback_data: 'menu_config' }],
