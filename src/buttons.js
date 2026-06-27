@@ -1967,8 +1967,8 @@ async function sendSignalMenu(chatId) {
     `🔽 <b>Filters (from Screener Filters):</b>`,
     `  Age: ${cf.minAgeMin ?? 0}-${cf.maxAgeMin ?? 0}m`,
     `  Vol: ${fmtVol(cf.minVolume ?? 0)}+`,
-    `  Bundler: <${((cf.maxBundlerRate ?? 0)*100).toFixed(0)}%`,
-    `  Top10: <${((cf.maxTop10HolderRate ?? 0)*100).toFixed(0)}%`,
+    `  Bundler: &lt;${((cf.maxBundlerRate ?? 0)*100).toFixed(0)}%`,
+    `  Top10: &lt;${((cf.maxTop10HolderRate ?? 0)*100).toFixed(0)}%`,
     `  CreatorOpen: ${(cf.maxCreatorOpenCount ?? 0) || 'OFF'}`,
     `  Score: ${cfg.minScore ?? 40}+`,
   ];
