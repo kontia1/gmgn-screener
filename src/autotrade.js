@@ -152,9 +152,10 @@ function loadAutoConfig() {
   try {
     const closedFile = path.join(__dirname, '..', 'data', 'closed.json');
     const closed = JSON.parse(fs.readFileSync(closedFile, 'utf8'));
-    if (Array.isArray(closed)) {
+    const closedArr = Array.isArray(closed) ? closed : Object.values(closed);
+    if (closedArr.length) {
       const now = Date.now();
-      for (const c of closed) {
+      for (const c of closedArr) {
         if (c.tokenMint && c.closedAt) {
           const closedAt = new Date(c.closedAt).getTime();
           const elapsed = now - closedAt;
