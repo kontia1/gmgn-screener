@@ -424,7 +424,7 @@ async function _jupiterBuy(tokenMint, solAmount, walletLabel, slippageBps, _isRe
         await new Promise(r => setTimeout(r, 3000));
         const wallet = keypair.publicKey;
         const recentSigs = await conn.getSignaturesForAddress(wallet, { limit: 3 });
-        const freshSig = recentSigs.find(s => !s.err && (Date.now() / 1000 - s.blockTime) < 30);
+        const freshSig = recentSigs.find(s => !s.err && (s.blockTime == null || (Date.now() / 1000 - s.blockTime) < 30));
         if (freshSig) {
           console.log(`[TRADE] TX landed despite error: ${freshSig.signature.slice(0,20)}... — skipping retry to prevent double-buy`);
           return { success: true, signature: freshSig.signature, explorer: `https://solscan.io/tx/${freshSig.signature}`, tokenAmount: parseFloat(outAmount) / Math.pow(10, decimals) };
@@ -559,7 +559,13 @@ async function sellToken(tokenMint, tokenAmount, decimals, walletLabel = 'defaul
         amount: String(rawAmount), slippageBps: String(slippageBps),
         maxAccounts: '48',
       });
-      quote = await fetch(`${JUPITER_API}/quote?${params2}`, { headers: jupHeaders() }).then(r => r.json());
+      quote = await getQuote(tokenMint, SOL_MINT, rawAmount, slippageBps);
+      // Re-add maxAccounts via direct fetch (getQuote doesn't support it)
+      const quoteUrl = `${JUPITER_API}/quote?${params2}`;
+      const retryRes = await fetch(quoteUrl, { headers: jupHeaders(), signal: AbortSignal.timeout(15000) });
+      if (!retryRes.ok) throw new Error(`maxAccounts retry quote failed: ${retryRes.status}`);
+      quote = await retryRes.json();
+      if (!quote?.outAmount) throw new Error('maxAccounts retry: empty quote');
       swapResult = await getSwapTx(quote, keypair.publicKey);
     } else {
       throw txErr;

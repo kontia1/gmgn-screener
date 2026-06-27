@@ -204,6 +204,8 @@ async function enrichToken(token) {
     token.bot_degen_rate = stat.bot_degen_rate || token.bot_degen_rate || 0;
     token.fresh_wallet_rate = stat.fresh_wallet_rate || token.fresh_wallet_rate || 0;
     token.creator_hold_rate = stat.creator_hold_rate || token.creator_hold_rate || 0;
+    token.price_change_percent1h = parseFloat(price.price_change_percent1h) || token.price_change_percent1h || 0;
+    token.price_change_percent5m = parseFloat(price.price_change_percent5m) || token.price_change_percent5m || 0;
 
     // Wallet info for notification display
     const dev = info.dev || {};
@@ -461,11 +463,15 @@ async function runMigrationScan(processToken) {
 
             // Price slightly down but within tolerance → keep watching
             if (poll === maxPolls) {
-              // Max wait reached, price still slightly down but within tolerance → approve
-              console.log(`[MIGRATION] ${sym} APPROVED: max watch reached, drop ${Math.abs(changePct).toFixed(1)}% within tolerance`);
-              enriched.price_usd = currentPrice;
-              enriched.market_cap = parseFloat(price2.market_cap) || currentPrice * (enriched.circulating_supply || 0);
-              approved = true;
+              // Max wait reached — only approve if we have enough consecutive positive polls
+              if (consecutiveUp >= minPolls) {
+                console.log(`[MIGRATION] ${sym} APPROVED: max watch reached, ${consecutiveUp}x consecutive positive`);
+                enriched.price_usd = currentPrice;
+                enriched.market_cap = parseFloat(price2.market_cap) || currentPrice * (enriched.circulating_supply || 0);
+                approved = true;
+              } else {
+                console.log(`[MIGRATION] ${sym} REJECTED: max watch reached but only ${consecutiveUp}/${minPolls} consecutive positive`);
+              }
             }
           }
         } catch (watchErr) {
