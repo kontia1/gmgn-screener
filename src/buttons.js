@@ -1930,6 +1930,7 @@ async function sendSignalMenu(chatId) {
   clearPendingInput(chatId);
   const { getAutoConfig } = require('../src/autotrade');
   const cfg = getAutoConfig();
+  const cf = cfg.customFilters || {};
   const sig = cfg.signalScanner || {};
   const w = sig.signalWeights || {};
   const dc = sig.antiDoubleCount || { enabled: true, factor: 0.5 };
@@ -1962,6 +1963,14 @@ async function sendSignalMenu(chatId) {
     ...weightLines,
     ``,
     `✏️ = modified from default`,
+    ``,
+    `🔽 <b>Filters (from Screener Filters):</b>`,
+    `  Age: ${cf.minAgeMin ?? 0}-${cf.maxAgeMin ?? 0}m`,
+    `  Vol: ${fmtVol(cf.minVolume ?? 0)}+`,
+    `  Bundler: <${((cf.maxBundlerRate ?? 0)*100).toFixed(0)}%`,
+    `  Top10: <${((cf.maxTop10HolderRate ?? 0)*100).toFixed(0)}%`,
+    `  CreatorOpen: ${(cf.maxCreatorOpenCount ?? 0) || 'OFF'}`,
+    `  Score: ${cfg.minScore ?? 40}+`,
   ];
 
   const buttons = [
@@ -1975,6 +1984,7 @@ async function sendSignalMenu(chatId) {
      { text: dc.enabled !== false ? '🔄 Anti-DC ON' : '🔄 Anti-DC OFF', callback_data: 'cfg_signal_anti_dc' }],
     [{ text: `🌐 Dedup: ${dedupTtl}s`, callback_data: 'cfg_signal_input_dedupTtlSec' }],
     [{ text: '📋 Edit Weights', callback_data: 'cfg_signal_weight_edit' }],
+    [{ text: '🔽 Edit Filters', callback_data: 'menu_config' }],
     [{ text: '🔙 Back', callback_data: 'menu_config' }],
   ];
 
