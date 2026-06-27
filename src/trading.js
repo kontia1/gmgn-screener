@@ -522,13 +522,29 @@ async function sellToken(tokenMint, tokenAmount, decimals, walletLabel = 'defaul
   console.log(`[TRADE] Sell ${tokenAmount} of ${tokenMint} (slippage ${slippageBps/100}%)`);
 
   // Get quote — Jupiter handles routing automatically
-  const quote = await getQuote(tokenMint, SOL_MINT, rawAmount, slippageBps);
+  let quote = await getQuote(tokenMint, SOL_MINT, rawAmount, slippageBps);
   if (!quote || !quote.outAmount) throw new Error('Empty quote');
-  const solOut = parseFloat(quote.outAmount) / 1e9;
+  let solOut = parseFloat(quote.outAmount) / 1e9;
   console.log(`[TRADE] Quote: ${solOut} SOL (price impact: ${quote.priceImpactPct}%)`);
 
-  // Get swap transaction
-  const swapResult = await getSwapTx(quote, keypair.publicKey);
+  // Get swap transaction — retry with lower maxAccounts if encoding overruns
+  let swapResult;
+  try {
+    swapResult = await getSwapTx(quote, keypair.publicKey);
+  } catch (txErr) {
+    if ((txErr.message || '').includes('encoding overruns')) {
+      console.log(`[TRADE] Sell TX too large, retrying with maxAccounts=48...`);
+      const params2 = new URLSearchParams({
+        inputMint: tokenMint, outputMint: SOL_MINT,
+        amount: String(rawAmount), slippageBps: String(slippageBps),
+        maxAccounts: '48',
+      });
+      quote = await fetch(`${JUPITER_API}/quote?${params2}`, { headers: jupHeaders() }).then(r => r.json());
+      swapResult = await getSwapTx(quote, keypair.publicKey);
+    } else {
+      throw txErr;
+    }
+  }
 
   // Deserialize and sign
   const txBuf = Buffer.from(swapResult.swapTransaction, 'base64');
