@@ -410,10 +410,30 @@ async function _jupiterBuy(tokenMint, solAmount, walletLabel, slippageBps, _isRe
       maxRetries: 3,
     });
   } catch (sendErr) {
-    // Extract failed DEX from error message AND logs array
+    // CRITICAL: Check if TX actually landed before retrying (prevents double-buy)
     const errStr = sendErr.message || '';
     const errLogs = Array.isArray(sendErr.logs) ? sendErr.logs.join(' ') : '';
     const combinedErr = errStr + ' ' + errLogs;
+
+    // If error is NOT a simulation failure, the TX might have landed — verify
+    const isSimulationFail = combinedErr.includes('Simulation failed') || combinedErr.includes('0x1771') || combinedErr.includes('ExceededSlippage') || combinedErr.includes('pAMM') || combinedErr.includes('account required');
+    if (!isSimulationFail) {
+      console.log(`[TRADE] sendTransaction threw non-simulation error: ${errStr.slice(0,100)} — checking if TX landed...`);
+      // Wait briefly and check recent signatures for this wallet
+      try {
+        await new Promise(r => setTimeout(r, 3000));
+        const wallet = keypair.publicKey;
+        const recentSigs = await conn.getSignaturesForAddress(wallet, { limit: 3 });
+        const freshSig = recentSigs.find(s => !s.err && (Date.now() / 1000 - s.blockTime) < 30);
+        if (freshSig) {
+          console.log(`[TRADE] TX landed despite error: ${freshSig.signature.slice(0,20)}... — skipping retry to prevent double-buy`);
+          return { success: true, signature: freshSig.signature, explorer: `https://solscan.io/tx/${freshSig.signature}`, tokenAmount: parseFloat(outAmount) / Math.pow(10, decimals) };
+        }
+      } catch (verifyErr) {
+        console.log(`[TRADE] TX verify failed: ${verifyErr.message?.slice(0,50)}`);
+      }
+    }
+
     const pammMatch = combinedErr.match(/(pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA)/);
     if (pammMatch) excludedDexes.push(pammMatch[1]);
     console.log(`[TRADE] Simulation failed: ${errStr.slice(0, 120)} — retrying${excludedDexes.length ? ` (exclude ${excludedDexes[0].slice(0,8)}..)` : ''}`);
