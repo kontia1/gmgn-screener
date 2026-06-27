@@ -188,9 +188,9 @@ async function enrichToken(token) {
     token.liquidity = parseFloat(pool.liquidity) || token.liquidity || 0;
     token.holder_count = stat.holder_count || price.holder_count || token.holder_count || 0;  // stat first (Meteora tokens)
     token.exchange = pool.exchange || token.exchange || '';
-    token.market_cap = parseFloat(price.market_cap) || (parseFloat(price.price) || 0) * (parseFloat(price.circulating_supply) || 0) || 0;
+    token.market_cap = parseFloat(price.market_cap) || (parseFloat(price.price) || 0) * (parseFloat(raw.circulating_supply || price.circulating_supply) || 0) || 0;
     token.price_usd = parseFloat(price.price) || 0;
-    token.circulating_supply = parseFloat(price.circulating_supply) || 0;
+    token.circulating_supply = parseFloat(raw.circulating_supply || price.circulating_supply) || 0;
     token.top_10_holder_rate = stat.top_10_holder_rate || token.top_10_holder_rate || 0;
     token.bundler_rate = stat.bundler_trader_amount_rate || token.bundler_rate || 0;
     token.creation_timestamp = pool.creation_timestamp || token.creation_timestamp || 0;  // for age filter

@@ -339,8 +339,17 @@ async function main() {
     // ── Normal alert + autoBuy ──
     // Set trade amount for notification (before buy executes)
     if (!token._totalUsd && !token._tradeAmountUsd) {
-      const solPrice = global._solPriceUsd || 0;
-      token._tradeAmountUsd = (cfg.buyAmountSol || 0.015) * solPrice;
+      let solPrice = global._solPriceUsd || 0;
+      // Fetch SOL price if not cached yet (async, won't block notification)
+      if (!solPrice && !global._solPriceFetching) {
+        global._solPriceFetching = true;
+        fetch('https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd')
+          .then(r => r.json())
+          .then(d => { global._solPriceUsd = d.solana?.usd || 0; global._solPriceTs = Date.now(); global._solPriceFetching = false; })
+          .catch(() => { global._solPriceFetching = false; });
+      }
+      // Use cached price or estimate ~$150 as fallback for first notification
+      token._tradeAmountUsd = (cfg.buyAmountSol || 0.015) * (solPrice || 150);
     }
     const tagStr = (token._walletTags || []).filter(t => t !== 'wash_trader').join(', ');
     const walletInfo = token._walletTwitter
