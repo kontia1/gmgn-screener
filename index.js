@@ -363,7 +363,7 @@ async function main() {
       ``,
       `📊 Score: ${baseScore}`,
       `${sourceLabel}: ${confidence} (${wallets} wallet${wallets > 1 ? 's' : ''})`,
-      `💰 Amount: $${(token._totalUsd || token._tradeAmountUsd || 0).toFixed(0)}`,
+      `💰 Amount: ${cfg.buyAmountSol || 0.015} SOL`,
       `👤 Wallet: ${walletInfo}${tagStr ? ` (${tagStr})` : ''}`,
       token._uniqueWallets > 1 ? `👥 ${token._uniqueWallets} wallets buying` : null,
       ``,
