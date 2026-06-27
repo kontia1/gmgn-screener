@@ -29,6 +29,9 @@ const DEFAULT_MIGRATION_CONFIG = {
   targetExchanges: ['pump_amm', 'meteora_damm_v2'], // migration targets to detect
   watchSec: 30,             // wait N seconds after migration before buying
   maxDropPct: 15,           // skip if price drops > N% during watch period
+  maxBotDegenRate: 0.40,    // skip if bot degen rate > 40% (bot-heavy)
+  maxPriceChange1h: 200,    // skip if 1h price change > 200% (already pumped)
+  minConsecutivePolls: 2,   // require N consecutive positive polls before approving
 };
 
 // ─── State ──────────────────────────────────────────────
@@ -394,14 +397,29 @@ async function runMigrationScan(processToken) {
     const tag = isExternal ? '🔗 EXTERNAL' : '🎯';
     console.log(`[MIGRATION] ${tag} ${sym} ${event.fromExchange} → ${event.toExchange} (${event._detectionMethod}) | MC=$${Math.round(mc)} | Liq=$${Math.round(liq)}`);
 
-    // ── Watcher: poll every 5s, buy immediately if price up, skip if dump ──
+    // ── Pre-watch quality filters ──
+    const botDegen = enriched.bot_degen_rate || event.bot_degen_rate || 0;
+    if (config.maxBotDegenRate && botDegen > config.maxBotDegenRate) {
+      console.log(`[MIGRATION] ${sym} REJECTED: botDegenRate=${(botDegen*100).toFixed(1)}% (max ${(config.maxBotDegenRate*100).toFixed(0)}%)`);
+      continue;
+    }
+
+    const priceChange1h = enriched.price_change_percent1h || event.price_change_percent1h || 0;
+    if (config.maxPriceChange1h && Math.abs(priceChange1h) > config.maxPriceChange1h) {
+      console.log(`[MIGRATION] ${sym} REJECTED: priceChange1h=${priceChange1h.toFixed(1)}% (max ${config.maxPriceChange1h}%)`);
+      continue;
+    }
+
+    // ── Watcher: poll every 3s, require consecutive positive polls ──
     if (config.watchSec > 0) {
       const initialPrice = enriched.price_usd || 0;
       const pollInterval = 3; // fixed 3s polling
       const maxPolls = Math.ceil(config.watchSec / pollInterval);
+      const minPolls = config.minConsecutivePolls || 2;
       let approved = false;
+      let consecutiveUp = 0;
 
-      console.log(`[MIGRATION] ${sym}: watching max ${config.watchSec}s, polling every ${pollInterval}s (initial: $${initialPrice})...`);
+      console.log(`[MIGRATION] ${sym}: watching max ${config.watchSec}s, polling every ${pollInterval}s, need ${minPolls}x consecutive up (initial: $${initialPrice})...`);
 
       for (let poll = 1; poll <= maxPolls; poll++) {
         await new Promise(r => setTimeout(r, pollInterval * 1000));
@@ -419,7 +437,7 @@ async function runMigrationScan(processToken) {
           if (initialPrice > 0 && currentPrice > 0) {
             const changePct = ((currentPrice - initialPrice) / initialPrice) * 100;
             const elapsed = poll * pollInterval;
-            console.log(`[MIGRATION] ${sym}: +${elapsed}s → $${currentPrice} (${changePct >= 0 ? '+' : ''}${changePct.toFixed(1)}%)`);
+            console.log(`[MIGRATION] ${sym}: +${elapsed}s → $${currentPrice} (${changePct >= 0 ? '+' : ''}${changePct.toFixed(1)}%) [${consecutiveUp}/${minPolls}]`);
 
             // Price dropped too much → skip
             if (changePct < -config.maxDropPct) {
@@ -427,13 +445,18 @@ async function runMigrationScan(processToken) {
               break;
             }
 
-            // Price is up or stable → buy immediately, don't wait full watchSec
+            // Price is up or stable → count consecutive positive
             if (changePct >= 0) {
-              console.log(`[MIGRATION] ${sym} APPROVED: price ${changePct >= 0 ? 'stable' : 'recovering'} after ${elapsed}s`);
-              enriched.price_usd = currentPrice;
-              enriched.market_cap = parseFloat(price2.market_cap) || currentPrice * (enriched.circulating_supply || 0);
-              approved = true;
-              break;
+              consecutiveUp++;
+              if (consecutiveUp >= minPolls) {
+                console.log(`[MIGRATION] ${sym} APPROVED: ${consecutiveUp}x consecutive positive after ${elapsed}s`);
+                enriched.price_usd = currentPrice;
+                enriched.market_cap = parseFloat(price2.market_cap) || currentPrice * (enriched.circulating_supply || 0);
+                approved = true;
+                break;
+              }
+            } else {
+              consecutiveUp = 0; // reset on negative
             }
 
             // Price slightly down but within tolerance → keep watching
