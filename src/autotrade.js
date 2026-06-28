@@ -861,7 +861,7 @@ function gmgnFetch(chain, address, timeoutMs = 5000) {
 // ─── Rug Signal Detector ─────────────────────────────
 // Compares current GMGN data with entry snapshot
 // Returns { isRug: bool, signals: string[] }
-async function checkRugSignals(pos, cachedGmgnData, cachedLastQuoteSol) {
+async function checkRugSignals(pos, cachedGmgnData, cachedLastQuoteSol, isDryMode) {
   const snap = pos.gmgnSnapshot;
   if (!snap) return { isRug: false, signals: [] };
 
@@ -1783,7 +1783,7 @@ async function processUnifiedPosition(pos, isDryMode) {
 
   // ─── STEP 2: Rug signals (use cached GMGN, no refetch) ───
   const cachedLastQuoteSol = pos._lastRugQuoteSol || 0;
-  const rugResult = await checkRugSignals(pos, gmgnData, cachedLastQuoteSol);
+  const rugResult = await checkRugSignals(pos, gmgnData, cachedLastQuoteSol, isDryMode);
   updatePosField(pos, isDryMode, { _lastRugScore: rugResult.rawRugScore || rugResult.rugScore || 0, _emaRugScore: pos._emaRugScore });
 
   // ─── STEP 3: Jupiter quote (conditional + global cap) ───
