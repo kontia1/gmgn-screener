@@ -22,15 +22,15 @@ const DEFAULT_MIGRATION_CONFIG = {
   mcMin: 5000,              // min MC $5K
   mcMax: 200000,            // max MC $200K
   minLiquidity: 5000,       // min liquidity $5K
-  maxBundlerRate: 0.30,     // max bundler 30%
-  maxTop10HolderRate: 0.40, // max top10 40%
+  maxBundlerRate: 0.50,     // max bundler 50% (migration tokens naturally bot-heavy)
+  maxTop10HolderRate: 0.55, // max top10 55% (not yet distributed post-migration)
   minHolder: 20,            // min holders 20
   minScore: 35,             // min score (lower than other sources — migration is strong signal)
   targetExchanges: ['pump_amm', 'meteora_damm_v2'], // migration targets to detect
   watchSec: 30,             // wait N seconds after migration before buying
   maxDropPct: 15,           // skip if price drops > N% during watch period
-  maxBotDegenRate: 0.40,    // skip if bot degen rate > 40% (bot-heavy)
-  maxPriceChange1h: 200,    // skip if 1h price change > 200% (already pumped)
+  maxBotDegenRate: 0.55,    // skip if bot degen rate > 55% (migration = bot-heavy)
+  maxPriceChange1h: 500,    // skip if 1h price change > 500% (pump expected at migration)
   minConsecutivePolls: 2,   // require N consecutive positive polls before approving
 };
 
@@ -336,7 +336,8 @@ async function runMigrationScan(processToken) {
     }
 
     // Filter: top10 concentration (ALL tokens — high concentration = scam risk)
-    if (top10 > 0.50) {
+    // Relaxed to 60% for migration tokens (not yet distributed post-migration)
+    if (top10 > 0.60) {
       console.log(`[MIGRATION] ${sym} REJECTED: top10=${(top10 * 100).toFixed(0)}% (>50% = scam risk)`);
       continue;
     }
