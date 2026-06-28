@@ -31,6 +31,7 @@ const DEFAULT_MIGRATION_CONFIG = {
   maxDropPct: 15,           // skip if price drops > N% during watch period
   maxBotDegenRate: 0.55,    // skip if bot degen rate > 55% (migration = bot-heavy)
   maxPriceChange1h: 500,    // skip if 1h price change > 500% (pump expected at migration)
+  maxEntrapment: 0.08,      // skip if entrapment > 8% (insider manipulation signal)
   minConsecutivePolls: 2,   // require N consecutive positive polls before approving
 };
 
@@ -325,6 +326,7 @@ async function runMigrationScan(processToken) {
     const bundler = enriched.bundler_rate || event.bundler_rate || 0;
     const top10 = enriched.top_10_holder_rate || event.top_10_holder_rate || 0;
     const holders = enriched.holder_count || 0;
+    const entrapment = parseFloat(enriched.entrapment_ratio || event.entrapment_ratio || 0);
     const isExternal = !['pump', 'pump_amm', ''].includes(enriched.exchange || event.exchange || '');
 
     // Filter: token age — reject old tokens (>60 min = already migrated long ago)
@@ -369,6 +371,12 @@ async function runMigrationScan(processToken) {
     // Filter: holders
     if (config.minHolder && holders < config.minHolder) {
       console.log(`[MIGRATION] ${sym} REJECTED: holders=${holders} (min=${config.minHolder})`);
+      continue;
+    }
+
+    // Filter: entrapment (insider manipulation — losers avg 12%, winners avg 4%)
+    if (config.maxEntrapment && entrapment > config.maxEntrapment) {
+      console.log(`[MIGRATION] ${sym} REJECTED: entrapment=${(entrapment * 100).toFixed(1)}% (max=${(config.maxEntrapment * 100).toFixed(0)}%)`);
       continue;
     }
 
