@@ -335,13 +335,6 @@ async function runMigrationScan(processToken) {
       continue;
     }
 
-    // Filter: top10 concentration (ALL tokens — high concentration = scam risk)
-    // Relaxed to 60% for migration tokens (not yet distributed post-migration)
-    if (top10 > 0.60) {
-      console.log(`[MIGRATION] ${sym} REJECTED: top10=${(top10 * 100).toFixed(0)}% (>50% = scam risk)`);
-      continue;
-    }
-
     // Filter: liquidity sanity check — enriched liq must be > $100
     // (Meteora tokens show $30K in trenches but $8 in token info = different pool = scam)
     if (liq > 0 && liq < 100) {
