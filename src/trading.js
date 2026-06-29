@@ -587,7 +587,34 @@ async function sellToken(tokenMint, tokenAmount, decimals, walletLabel = 'defaul
   } catch (sellErr) {
     const errStr = sellErr.message || '';
     if (errStr.includes('pAMM') || errStr.includes('account required')) {
-      console.log(`[TRADE] Sell failed (pAMM broken), trying Pump.fun SDK...`);
+      // Try Jupiter with excludeDexes to force alternative routes (Raydium etc)
+      console.log(`[TRADE] Sell failed (pAMM broken), trying Jupiter excludeDexes...`);
+      try {
+        const pAMM = 'pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA';
+        const retryQuote = await getQuote(tokenMint, SOL_MINT, rawAmount, slippageBps, [pAMM]);
+        if (retryQuote?.outAmount) {
+          const retrySwap = await getSwapTx(retryQuote, keypair.publicKey);
+          const retryTxBuf = Buffer.from(retrySwap.swapTransaction, 'base64');
+          const retryTx = VersionedTransaction.deserialize(retryTxBuf);
+          retryTx.sign([keypair]);
+          const retrySig = await conn.sendTransaction(retryTx, { skipPreflight: false, maxRetries: 3 });
+          console.log(`[TRADE] excludeDexes sell TX sent: ${retrySig}`);
+          const retryStatus = await Promise.race([
+            conn.confirmTransaction(retrySig, 'confirmed'),
+            new Promise((_, rej) => setTimeout(() => rej(new Error('confirm timeout')), 60_000))
+          ]);
+          const retryErr = retryStatus?.err || retryStatus?.value?.err;
+          if (!retryErr) {
+            const retrySolOut = parseFloat(retryQuote.outAmount) / 1e9;
+            return { success: true, signature: retrySig, inputAmount: tokenAmount, outputSol: retrySolOut, priceImpact: retryQuote.priceImpactPct, explorer: `https://solscan.io/tx/${retrySig}` };
+          }
+          console.log(`[TRADE] excludeDexes sell also failed on-chain: ${JSON.stringify(retryErr)}`);
+        }
+      } catch (exclErr) {
+        console.log(`[TRADE] excludeDexes sell failed: ${exclErr.message}`);
+      }
+      // Last resort: Pump.fun SDK
+      console.log(`[TRADE] Trying Pump.fun SDK as last resort...`);
       return await pumpSdkSell(tokenMint, tokenAmount, decimals, slippageBps);
     }
     throw sellErr;

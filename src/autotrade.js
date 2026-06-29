@@ -748,6 +748,8 @@ async function executeFullExit(pos, reason, quoteSolOut = 0, { lockHeld = false 
     if (!result || !result.success) throw new Error('All slippage levels failed');
 
     if (result.success) {
+      // Reset fail counter on successful sell
+      if (!pos.isDryRun) { try { const { updatePosition: uf } = require("./positions"); uf(pos.tokenMint, { sellFailCount: 0 }); } catch(_) {} }
       let closed;
       try {
         closed = closePosition(pos.tokenMint, result.outputSol, result.signature, reasonStr);
@@ -829,11 +831,17 @@ async function executeFullExit(pos, reason, quoteSolOut = 0, { lockHeld = false 
     }
     const failCount = (pos.sellFailCount || 0) + 1;
     if (!pos.isDryRun) { try { const { updatePosition: uf } = require("./positions"); uf(pos.tokenMint, { sellFailCount: failCount }); } catch(_) {} }
-    if (failCount >= 3) {
+    const isRouteError = msg.includes('pAMM') || msg.includes('pump-amm') || msg.includes('6004') || msg.includes('account required');
+    if (failCount >= 3 && !isRouteError) {
+      // Only close as dead token if error is NOT a routing issue (token might still be alive)
       console.error(`[AUTO] ${pos.symbol}: sell failed ${failCount}x, closing as loss`);
       try { closePosition(pos.tokenMint, 0, "", "sell_failed_3x"); } catch(_) {}
       setPostCloseLock(pos.tokenMint);
       sendTelegram(`🔴 <b>Auto-Close (Sell Failed 3x): ${pos.symbol}</b>\n\n📊 PNL: -${(pos.solSpent || 0).toFixed(4)} SOL (total loss)\n📝 Error: ${redactErr(e.message)}`).catch(() => {});
+    } else if (failCount >= 3 && isRouteError) {
+      // Route error (pAMM broken) — token is alive, don't close, retry next cycle
+      console.error(`[AUTO] ${pos.symbol}: sell failed ${failCount}x (route error), keeping position open for retry`);
+      sendTelegram(`⚠️ <b>Sell Route Error: ${pos.symbol}</b>\n\nToken still in wallet, will retry next cycle.\n📝 Error: ${redactErr(e.message)}`).catch(() => {});
     } else {
       console.error(`[AUTO] Full exit failed (${failCount}/3): ${e.message}`);
       await sendTelegram(`❌ Auto-Sell failed: ${pos.symbol}\n${redactErr(e.message)}\n⚠️ Attempt ${failCount}/3`);
