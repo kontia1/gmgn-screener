@@ -733,7 +733,19 @@ async function executeFullExit(pos, reason, quoteSolOut = 0, { lockHeld = false 
   }
 
   try {
-    const result = await sellAll(pos.tokenMint, autoConfig.walletLabel, 1500); // 15% slippage for emergency sells
+    let result;
+    const slipLevels = [1500, 2000, 2500]; // 15% → 20% → 25%
+    for (let attempt = 0; attempt < slipLevels.length; attempt++) {
+      try {
+        result = await sellAll(pos.tokenMint, autoConfig.walletLabel, slipLevels[attempt]);
+        if (result.success) break;
+      } catch (sellErr) {
+        console.error(`[EXIT] ${pos.symbol}: attempt ${attempt + 1}/${slipLevels.length} (${slipLevels[attempt] / 100}% slip) failed: ${sellErr.message}`);
+        if (attempt < slipLevels.length - 1) continue;
+        throw sellErr;
+      }
+    }
+    if (!result || !result.success) throw new Error('All slippage levels failed');
 
     if (result.success) {
       let closed;
@@ -1538,15 +1550,16 @@ async function checkBundlers() {
             setPostCloseLock(pos.tokenMint);
             await sendTelegram(`🟡 <b>DRY RUN — Auto-Sell (Bundler): ${pos.symbol}</b>\n\n📊 PNL: ${closed.pnl >= 0 ? '+' : ''}${closed.pnl.toFixed(4)} SOL (${closed.pnlPct}%)`);
           } else {
-            // Live: retry sell 3x before giving up
+            // Live: retry sell 3x with escalating slippage
             let sellResult = null;
-            for (let attempt = 1; attempt <= 3; attempt++) {
+            const slipLevels = [1500, 2000, 2500];
+            for (let attempt = 0; attempt < slipLevels.length; attempt++) {
               try {
-                sellResult = await sellAll(pos.tokenMint, autoConfig.walletLabel, 1500); // 15% slippage for emergency sells
+                sellResult = await sellAll(pos.tokenMint, autoConfig.walletLabel, slipLevels[attempt]);
                 if (sellResult.success) break;
               } catch (sellErr) {
-                console.error(`[BUNDLER] Sell attempt ${attempt}/3 failed: ${sellErr.message}`);
-                if (attempt < 3) await new Promise(r => setTimeout(r, 2000));
+                console.error(`[BUNDLER] Sell attempt ${attempt + 1}/${slipLevels.length} (${slipLevels[attempt] / 100}% slip) failed: ${sellErr.message}`);
+                if (attempt < slipLevels.length - 1) await new Promise(r => setTimeout(r, 2000));
               }
             }
             if (sellResult?.success) {
@@ -1739,7 +1752,17 @@ async function processUnifiedPosition(pos, isDryMode) {
           console.log(`[UNIFIED] ${pos.symbol}: liq dropped to $0 — instant exit`);
           if (acquireSellLock(pos.tokenMint)) {
             try {
-              const closeResult = await sellAll(pos.tokenMint, autoConfig.walletLabel, 1500); // 15% slippage for emergency sells
+              let closeResult;
+              const slipLevels = [1500, 2000, 2500];
+              for (let attempt = 0; attempt < slipLevels.length; attempt++) {
+                try {
+                  closeResult = await sellAll(pos.tokenMint, autoConfig.walletLabel, slipLevels[attempt]);
+                  if (closeResult?.success) break;
+                } catch (slErr) {
+                  console.error(`[LIQ] ${pos.symbol}: attempt ${attempt + 1}/${slipLevels.length} (${slipLevels[attempt] / 100}% slip) failed: ${slErr.message}`);
+                  if (attempt < slipLevels.length - 1) continue;
+                }
+              }
               if (closeResult?.success) {
                 const closed = closePosition(pos.tokenMint, closeResult.outputSol, closeResult.signature, 'liq_drain_100%');
                 setPostCloseLock(pos.tokenMint);
