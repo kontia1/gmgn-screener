@@ -350,8 +350,10 @@ async function buyToken(tokenMint, solAmount, walletLabel = 'default', slippageB
     return await _jupiterBuy(tokenMint, solAmount, walletLabel, slippageBps, _isRetry);
   } catch (jupErr) {
     const msg = jupErr.message || '';
-    // If pAMM broken → fallback to PumpFun bonding curve
-    if (msg.includes('untradeable') || msg.includes('pAMM') || msg.includes('only route') || msg.includes('all routes')) {
+    // If pAMM broken AND PumpSDK wasn't already tried inside _jupiterBuy, fallback to PumpSDK
+    // _jupiterBuy already tries PumpSDK internally — don't double-call
+    const pumpSdkAlreadyTried = msg.includes('Pump.fun SDK') || msg.includes('Not on Pump.fun') || msg.includes('pump-bc') || msg.includes('PumpSwap AMM');
+    if (!pumpSdkAlreadyTried && (msg.includes('untradeable') || msg.includes('only route') || msg.includes('all routes'))) {
       console.log(`[TRADE] Jupiter failed (${msg.slice(0,80)}), falling back to Pump.fun SDK...`);
       return await pumpSdkBuy(tokenMint, solAmount, slippageBps);
     }
