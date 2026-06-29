@@ -630,9 +630,25 @@ async function handleCallbackQuery(cq) {
     return;
   }
 
-  // ── PNL Reset ──
+  // ── PNL Reset — confirmation ──
   if (data === 'pnl_reset_live' || data === 'pnl_reset_dry') {
     const isDry = data === 'pnl_reset_dry';
+    const label = isDry ? 'Dry Run' : 'Live';
+    const confirmCb = isDry ? 'pnl_reset_dry_confirm' : 'pnl_reset_live_confirm';
+    await tgApi('sendMessage', {
+      chat_id: chatId,
+      text: `⚠️ <b>Reset ${label} PNL?</b>\n\nThis will clear all closed position data. This cannot be undone.`,
+      parse_mode: 'HTML',
+      reply_markup: { inline_keyboard: [
+        [{ text: '✅ Yes, Reset', callback_data: confirmCb },
+         { text: '❌ Cancel', callback_data: 'menu_pnl' }],
+      ]}
+    });
+    return;
+  }
+
+  if (data === 'pnl_reset_live_confirm' || data === 'pnl_reset_dry_confirm') {
+    const isDry = data === 'pnl_reset_dry_confirm';
     const fs = require('fs');
     const path = require('path');
     const file = isDry
@@ -656,6 +672,85 @@ async function handleCallbackQuery(cq) {
   // ── Close Rugs ──
   if (data === 'close_rugs') return handleCloseRugs(chatId);
   if (data === 'close_empty_accounts') return handleCloseEmptyAccounts(chatId);
+
+  // ── Wallet Add Menu ──
+  if (data === 'wallet_add_menu') {
+    await tgApi('sendMessage', {
+      chat_id: chatId,
+      text: `➕ <b>Add Wallet</b>\n\nChoose how to add a wallet:`,
+      parse_mode: 'HTML',
+      reply_markup: { inline_keyboard: [
+        [{ text: '🆕 Create New', callback_data: 'wallet_add_new' },
+         { text: '📥 Import Key', callback_data: 'wallet_add_import' }],
+        [{ text: '🔙 Back', callback_data: 'menu_wallet' }],
+      ]}
+    });
+    return;
+  }
+
+  // ── Wallet Create New ──
+  if (data === 'wallet_add_new') {
+    try {
+      const w = wallet.createWallet('default');
+      await tgApi('sendMessage', {
+        chat_id: chatId,
+        text: `✅ <b>New wallet created</b>\n\n🔑 <code>${w.publicKey}</code>\n\n⚠️ Save this key securely:\n<code>${w.secretKey}</code>`,
+        parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: [[{ text: '🔙 Back', callback_data: 'menu_wallet' }]] },
+      });
+    } catch (e) {
+      await tgApi('sendMessage', { chat_id: chatId, text: `❌ ${e.message}`, parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: '🔙 Back', callback_data: 'menu_wallet' }]] } });
+    }
+    return;
+  }
+
+  // ── Wallet Import — prompt for key ──
+  if (data === 'wallet_add_import') {
+    pendingInputs.set(chatId, { handler: 'wallet_import_key', step: 'key' });
+    await tgApi('sendMessage', {
+      chat_id: chatId,
+      text: `📥 <b>Import Wallet</b>\n\nSend your private key (base58 or JSON array):`,
+      parse_mode: 'HTML',
+      reply_markup: { inline_keyboard: [[{ text: '❌ Cancel', callback_data: 'menu_wallet' }]] },
+    });
+    return;
+  }
+
+  // ── Wallet Delete — confirmation ──
+  if (data === 'wallet_delete_confirm') {
+    try {
+      const pubs = wallet.listWallets();
+      const pub = pubs[0]?.publicKey || 'No wallet';
+      await tgApi('sendMessage', {
+        chat_id: chatId,
+        text: `⚠️ <b>Delete Wallet?</b>\n\n🔑 <code>${pub}</code>\n\nThis will remove the wallet from the bot. Make sure you have saved the private key.`,
+        parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: [
+          [{ text: '✅ Yes, Delete', callback_data: 'wallet_delete_yes' },
+           { text: '❌ Cancel', callback_data: 'menu_wallet' }],
+        ]}
+      });
+    } catch (e) {
+      await tgApi('sendMessage', { chat_id: chatId, text: `❌ ${e.message}`, parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: '🔙 Back', callback_data: 'menu_wallet' }]] } });
+    }
+    return;
+  }
+
+  // ── Wallet Delete — execute ──
+  if (data === 'wallet_delete_yes') {
+    try {
+      wallet.removeWallet('default');
+      await tgApi('sendMessage', {
+        chat_id: chatId,
+        text: `✅ <b>Wallet deleted</b>`,
+        parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: [[{ text: '🔙 Back', callback_data: 'menu_wallet' }]] },
+      });
+    } catch (e) {
+      await tgApi('sendMessage', { chat_id: chatId, text: `❌ ${e.message}`, parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: '🔙 Back', callback_data: 'menu_wallet' }]] } });
+    }
+    return;
+  }
 
   // ── Sell actions ──
   const sellMatch = data.match(/^sell_(\d+)_(.+)$/);
@@ -786,6 +881,29 @@ async function handleCallbackQuery(cq) {
 async function handlePendingInput(chatId, text) {
   const pending = pendingInputs.get(chatId);
   if (!pending) return false;
+
+  // ── Wallet Import Key (text, not number) ──
+  if (pending.handler === 'wallet_import_key') {
+    try {
+      const w = wallet.importWallet(text.trim(), 'default');
+      const sol = await wallet.getSolBalance();
+      pendingInputs.delete(chatId);
+      await tgApi('sendMessage', {
+        chat_id: chatId,
+        text: `✅ <b>Wallet imported</b>\n\n🔑 <code>${w.publicKey}</code>\n💰 SOL: ${sol.toFixed(4)}`,
+        parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: [[{ text: '🔙 Back', callback_data: 'menu_wallet' }]] },
+      });
+    } catch (e) {
+      await tgApi('sendMessage', {
+        chat_id: chatId,
+        text: `❌ Import failed: ${e.message}\n\nTry again or cancel:`,
+        parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: [[{ text: '❌ Cancel', callback_data: 'menu_wallet' }]] },
+      });
+    }
+    return true;
+  }
 
   const num = parseFloat(text);
   if (isNaN(num)) {
@@ -1352,6 +1470,8 @@ async function sendWalletMenu(chatId) {
     }
 
     const buttons = [
+      [{ text: '➕ Add Wallet', callback_data: 'wallet_add_menu' },
+       { text: '🗑️ Delete Wallet', callback_data: 'wallet_delete_confirm' }],
       [{ text: '💀 Close Rugs', callback_data: 'close_rugs' },
        { text: '🔄 Refresh', callback_data: 'menu_wallet' }],
     ];
