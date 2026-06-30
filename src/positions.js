@@ -155,6 +155,7 @@ function _closePosition(tokenMint, solReceived, txSignature, reason = 'manual') 
 
   const closed = {
     ...pos,
+    totalSolReceived: totalReceived,  // MUST override pos.totalSolReceived (only tracks partials during open, full exit amount not yet included)
     solReceived: totalReceived,
     pnl: parseFloat(pnl.toFixed(6)),
     pnlPct: parseFloat(pnlPct),
